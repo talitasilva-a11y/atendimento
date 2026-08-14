@@ -1050,7 +1050,8 @@ function computeReceivedMetrics(rows){
   const pctAtendidas = entrantes? atendidas.length/entrantes : NaN;
   const nivelServico = (atendidas.length+naoAtendidas.length) ? (atendidas20*100/(atendidas.length+naoAtendidas.length)) : NaN;
   const ctee = comEspera.length ? acima5*100/comEspera.length : NaN;
-  const tma = avg(atendidas.map(r=>r._dur));
+  // TMA das chamadas ativas: considerar somente chamadas atendidas com duração superior a 60s.
+  const tma = avg(atendidas.filter(r=>isFinite(r._dur) && r._dur>60).map(r=>r._dur));
   const tme = avg(atendidas.map(r=>r._esp));
 
   const byClientDay = {};
