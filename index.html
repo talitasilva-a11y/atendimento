@@ -426,22 +426,72 @@ const SHEETS = {
    — isso monta este bloco pronto para você colar aqui.
    ============================================================ */
 const DEFAULT_URLS = {
-  received: "",
-  made: "",
-  chat: "",
-  chatPerf: "",
-  satisfaction: "",
-  monitoring: "",
-  pause: ""
+  "received": "https://docs.google.com/spreadsheets/d/e/2PACX-1vQbM1WjFN4jhf0ZwTpWFY6feZfVc9qTzW4Kcyf5akkvEKKBtfmWuanOwVqYrQD-vMmj0G9Xo8_AWy9W/pub?gid=1827860290&single=true&output=csv",
+  "made": "https://docs.google.com/spreadsheets/d/e/2PACX-1vQbM1WjFN4jhf0ZwTpWFY6feZfVc9qTzW4Kcyf5akkvEKKBtfmWuanOwVqYrQD-vMmj0G9Xo8_AWy9W/pub?gid=428235994&single=true&output=csv",
+  "chat": "https://docs.google.com/spreadsheets/d/e/2PACX-1vQbM1WjFN4jhf0ZwTpWFY6feZfVc9qTzW4Kcyf5akkvEKKBtfmWuanOwVqYrQD-vMmj0G9Xo8_AWy9W/pub?gid=841736809&single=true&output=csv",
+  "chatPerf": "https://docs.google.com/spreadsheets/d/e/2PACX-1vQbM1WjFN4jhf0ZwTpWFY6feZfVc9qTzW4Kcyf5akkvEKKBtfmWuanOwVqYrQD-vMmj0G9Xo8_AWy9W/pub?gid=471818960&single=true&output=csv",
+  "satisfaction": "https://docs.google.com/spreadsheets/d/e/2PACX-1vQbM1WjFN4jhf0ZwTpWFY6feZfVc9qTzW4Kcyf5akkvEKKBtfmWuanOwVqYrQD-vMmj0G9Xo8_AWy9W/pub?gid=827270333&single=true&output=csv",
+  "monitoring": "https://docs.google.com/spreadsheets/d/e/2PACX-1vQbM1WjFN4jhf0ZwTpWFY6feZfVc9qTzW4Kcyf5akkvEKKBtfmWuanOwVqYrQD-vMmj0G9Xo8_AWy9W/pub?gid=968538961&single=true&output=csv",
+  "pause": "https://docs.google.com/spreadsheets/d/e/2PACX-1vQbM1WjFN4jhf0ZwTpWFY6feZfVc9qTzW4Kcyf5akkvEKKBtfmWuanOwVqYrQD-vMmj0G9Xo8_AWy9W/pub?gid=558608578&single=true&output=csv"
 };
 const DEFAULT_MAPPING = {
-  received: {},
-  made: {},
-  chat: {},
-  chatPerf: {},
-  satisfaction: {},
-  monitoring: {},
-  pause: {}
+  "received": {
+    "data": "Data",
+    "agente": "Atendente",
+    "contato": "Contato",
+    "setor": "Setor",
+    "status": "Status da Chamada",
+    "quemDesligou": "Quem Desligou",
+    "transferDe": "Recebeu transferência de",
+    "transferPara": "Transferiu para",
+    "tempoEspera": "Tempo em espera",
+    "tempoLigacao": "Tempo em ligação"
+  },
+  "made": {
+    "data": "Data Início",
+    "destino": "Destino",
+    "agente": "Atendente",
+    "setor": "Setor",
+    "status": "Status da Chamada",
+    "transferPara": "Transferiu para",
+    "tempoLigacao": "Tempo em ligação"
+  },
+  "chat": {
+    "data": "data",
+    "agente": "agente",
+    "setor": "Setor"
+  },
+  "chatPerf": {
+    "data": "data",
+    "agente": "Atendente",
+    "setor": "setor",
+    "conversasSat": "Conversas com satisfação",
+    "satisfacaoMedia": "Satisfação média",
+    "total": "Total",
+    "tma": "TMA",
+    "tmeResp": "TME 1ª Resposta"
+  },
+  "satisfaction": {
+    "data": "data",
+    "agente": "agente",
+    "setor": "setor",
+    "canal": "canal",
+    "nota": "nota"
+  },
+  "monitoring": {
+    "data": "data",
+    "agente": "agente",
+    "setor": "setor",
+    "nota": "nota",
+    "canal": "canal"
+  },
+  "pause": {
+    "data": "data",
+    "agente": "agente",
+    "setor": "setor",
+    "tipo": "pausa",
+    "duracao": "duracao"
+  }
 };
 const HEADER_GUESSES = {
   data:["data","data início","data inicio"], agente:["atendente","agente"],
