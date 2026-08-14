@@ -279,7 +279,9 @@ table.data-table tbody tr:hover{background:#FAFAFD;}
 </div>
 
 <div class="loading-overlay" id="loadingOverlay">
-  <div class="loading-box"><div class="spinner"></div><span id="loadingText">Carregando dados...</span></div>
+  <div class="loading-box"><div class="spinner"></div><span id="loadingText">Carregando dados...</span>
+    <button class="btn btn-ghost btn-sm" id="btnCancelLoad" style="margin-left:6px;">Cancelar</button>
+  </div>
 </div>
 
 <script>
@@ -442,14 +444,13 @@ let state = {
   headers: {},
   raw: {},
   rows: {},
-  ramalMap: {},   // "4006" -> "Nome do Agente"
   filters: { period: "all", setor: "all", agente: "all", canal: "all" }
 };
 
 /* ---------- STORAGE ---------- */
 async function saveConfig(){
   try{
-    await window.storage.set('agility_config', JSON.stringify({urls:state.urls, mapping:state.mapping, ramalMap:state.ramalMap}), false);
+    await window.storage.set('agility_config', JSON.stringify({urls:state.urls, mapping:state.mapping}), false);
   }catch(e){ console.warn("storage save failed", e); }
 }
 async function loadConfig(){
@@ -459,19 +460,31 @@ async function loadConfig(){
       const parsed = JSON.parse(r.value);
       state.urls = parsed.urls || {};
       state.mapping = parsed.mapping || {};
-      state.ramalMap = parsed.ramalMap || {};
     }
   }catch(e){ /* sem config ainda */ }
 }
 
-/* ---------- CSV LOADING ---------- */
+/* ---------- CSV LOADING ----------
+   Abas grandes (ex.: Chamadas Realizadas, com 190k+ linhas) travavam a aba do
+   navegador porque o fetch()+parse rodava inteiro e de forma síncrona na thread
+   principal. Agora usamos o modo streaming do PapaParse (download + worker),
+   que baixa e interpreta o CSV em um Web Worker, em pedaços (chunks), e libera
+   a thread principal entre cada pedaço — a tela continua respondendo e mostra
+   o progresso em tempo real.
+
+   Além disso: cada carregamento tem um "número de geração" (loadGeneration).
+   Isso permite cancelar um carregamento travado (botão "Cancelar" no overlay)
+   sem precisar recarregar a página inteira — e sem perder os links salvos.
+   Cada carregamento também tem um tempo-limite automático, para nunca ficar
+   preso indefinidamente numa aba que não responde. */
+let loadGeneration = 0;
+const FETCH_TIMEOUT_MS = 150000; // 2m30s por aba antes de desistir automaticamente
+
 function parseCsvText(text){
   const res = Papa.parse(text, {header:true, skipEmptyLines:true, dynamicTyping:false});
   return {rows: res.data, headers: res.meta.fields || []};
 }
-async function fetchSheet(key){
-  const url = (state.urls[key]||"").trim();
-  if(!url) return {ok:false, reason:"no_url"};
+function buildCsvFetchUrl(url){
   let fetchUrl = url;
   const m = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
   if(m && !/output=csv|\/pub\?/.test(url)){
@@ -479,20 +492,47 @@ async function fetchSheet(key){
     const gid = gidMatch ? gidMatch[1] : "0";
     fetchUrl = `https://docs.google.com/spreadsheets/d/${m[1]}/export?format=csv&gid=${gid}`;
   }
-  try{
-    const resp = await fetch(fetchUrl, {mode:"cors"});
-    if(!resp.ok) throw new Error("HTTP "+resp.status);
-    const text = await resp.text();
-    const {rows, headers} = parseCsvText(text);
-    state.raw[key] = rows;
-    state.headers[key] = headers;
-    if(!state.mapping[key] || Object.keys(state.mapping[key]).length===0){
-      state.mapping[key] = autoGuessMapping(key, headers);
-    }
-    return {ok:true, rows: rows.length};
-  }catch(e){
-    return {ok:false, reason:"fetch_error", error:e.message};
-  }
+  return fetchUrl;
+}
+function fetchSheet(key, onProgress){
+  const myGen = loadGeneration;
+  const url = (state.urls[key]||"").trim();
+  if(!url) return Promise.resolve({ok:false, reason:"no_url"});
+  const fetchUrl = buildCsvFetchUrl(url);
+  return new Promise(resolve=>{
+    const rows = [];
+    let headers = [];
+    let gotAny = false;
+    let settled = false;
+    const finish = (result)=>{ if(settled) return; settled = true; clearTimeout(timer); resolve(result); };
+    const timer = setTimeout(()=>{ finish({ok:false, reason:"timeout"}); }, FETCH_TIMEOUT_MS);
+    Papa.parse(fetchUrl, {
+      download: true,
+      worker: true,
+      header: true,
+      skipEmptyLines: true,
+      chunk: function(results){
+        if(myGen!==loadGeneration) return; // cancelado nesse meio tempo — ignora o resto
+        gotAny = true;
+        if(!headers.length) headers = results.meta.fields || [];
+        for(const r of results.data) rows.push(r);
+        if(onProgress) onProgress(rows.length);
+      },
+      complete: function(){
+        if(myGen!==loadGeneration){ finish({ok:false, reason:"cancelled"}); return; }
+        if(!gotAny){ finish({ok:false, reason:"empty_or_cors"}); return; }
+        state.raw[key] = rows;
+        state.headers[key] = headers;
+        if(!state.mapping[key] || Object.keys(state.mapping[key]).length===0){
+          state.mapping[key] = autoGuessMapping(key, headers);
+        }
+        finish({ok:true, rows: rows.length});
+      },
+      error: function(err){
+        finish({ok:false, reason:"fetch_error", error: err && err.message});
+      }
+    });
+  });
 }
 function loadPastedCsv(key, text){
   const {rows, headers} = parseCsvText(text);
@@ -557,24 +597,44 @@ function isTransfer(v){
   const s = (v||"").toString().trim();
   return s!=="" && s!=="-";
 }
-function ramalLabel(v){
-  const s = (v||"").toString().trim().replace(/\.0$/,"");
-  if(!s || s==="-") return null;
-  return state.ramalMap[s] ? state.ramalMap[s] : `Ramal ${s}`;
+function normalizeFraction(v){
+  // Normaliza uma nota que pode estar em escala 0–1 OU já em escala 0–100 (ex.: monitoria)
+  if(!isFinite(v)) return v;
+  return v>1 ? v/100 : v;
 }
 
-/* ---------- NORMALIZAÇÃO ---------- */
+/* ---------- NORMALIZAÇÃO ----------
+   Além de mapear as colunas, já pré-calculamos aqui os campos derivados
+   (_date, _status, valores numéricos etc.) UMA VEZ no carregamento — em vez
+   de recalcular isso a cada troca de tela/filtro. Para a aba de Chamadas
+   Realizadas (190k+ linhas) isso é o que evita a tela travar toda vez que o
+   usuário navega ou muda um filtro. */
+const SHEET_ENRICHERS = {
+  received: r=>{ r._date=parseDateFlexible(r.data); r._status=normalizeStatus(r.status); r._esp=toNumber(r.tempoEspera); r._dur=toNumber(r.tempoLigacao); },
+  made: r=>{ r._date=parseDateFlexible(r.data); r._status=normalizeStatus(r.status); r._dur=toNumber(r.tempoLigacao); },
+  chat: r=>{ r._date=parseDateFlexible(r.data); },
+  chatPerf: r=>{ r._date=parseDateFlexible(r.data); r._total=toNumber(r.total); r._tma=durationToSeconds(r.tma); r._tmeResp=durationToSeconds(r.tmeResp); r._satMedia=toNumber(r.satisfacaoMedia); r._conversasSat=toNumber(r.conversasSat); },
+  satisfaction: r=>{ r._date=parseDateFlexible(r.data); r._nota=toNumber(r.nota); },
+  // a nota de monitoria pode vir na planilha como fração (0–1) OU já como percentual (0–100) —
+  // normalizamos sempre para fração 0–1 aqui, uma única vez, para não gerar ranking com "9827%".
+  monitoring: r=>{ r._date=parseDateFlexible(r.data); r._nota=normalizeFraction(toNumber(r.nota)); },
+  pause: r=>{ r._date=parseDateFlexible(r.data); r._sec=toNumber(r.duracao); },
+  abandonment: r=>{ r._date=parseDateFlexible(r.data); r._taxa=computeAbandonRate(r); },
+};
 function normalizeSheet(key){
   const map = state.mapping[key] || {};
   const rawRows = state.raw[key] || [];
-  const out = [];
-  for(const r of rawRows){
+  const enrich = SHEET_ENRICHERS[key];
+  const out = new Array(rawRows.length);
+  for(let i=0;i<rawRows.length;i++){
+    const r = rawRows[i];
     const o = {};
     for(const f of SHEETS[key].fields){
       const header = map[f.key];
       o[f.key] = header ? r[header] : undefined;
     }
-    out.push(o);
+    if(enrich) enrich(o);
+    out[i] = o;
   }
   state.rows[key] = out;
   return out;
@@ -604,20 +664,26 @@ function groupBy(rows, keyFn){
 }
 function esc(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function monthKey(d){ return d.toLocaleDateString('pt-BR', {month:'2-digit', year:'numeric'}); }
+const MESES_PT = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+const MESES_PT_LONG = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+function monthKeyISO(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,'0'); }
+function monthLabelShort(d){ return MESES_PT[d.getMonth()]+"/"+String(d.getFullYear()).slice(2); }
+function monthLabelFromISO(iso){ const [y,m] = iso.split("-"); return MESES_PT_LONG[+m-1]+" "+y; }
 
+// Filtro de período: por mês exato (ex.: "2026-03") ou "all" para todo o período
 function inPeriod(date){
-  if(!date) return state.filters.period==="all";
-  const now = new Date();
   const p = state.filters.period;
   if(p==="all") return true;
-  if(p==="today") return sameDay(date, now);
-  if(p==="7d"){ const d=new Date(now); d.setDate(d.getDate()-7); return date>=d; }
-  if(p==="30d"){ const d=new Date(now); d.setDate(d.getDate()-30); return date>=d; }
-  if(p==="month"){ return date.getMonth()===now.getMonth() && date.getFullYear()===now.getFullYear(); }
-  if(p==="lastmonth"){ const d=new Date(now.getFullYear(), now.getMonth()-1,1); return date.getMonth()===d.getMonth() && date.getFullYear()===d.getFullYear(); }
-  return true;
+  if(!date) return false;
+  return monthKeyISO(date)===p;
 }
-function sameDay(a,b){ return a.getFullYear()===b.getFullYear()&&a.getMonth()===b.getMonth()&&a.getDate()===b.getDate(); }
+function allMonthsAvailable(){
+  const set = new Set();
+  ["received","made","chat","satisfaction","monitoring","pause"].forEach(k=>{
+    (state.rows[k]||[]).forEach(r=>{ if(r._date) set.add(monthKeyISO(r._date)); });
+  });
+  return Array.from(set).sort();
+}
 
 function passesFilters(row, {setor=true, agente=true}={}){
   const f = state.filters;
@@ -639,13 +705,15 @@ function satCanalMatches(rawCanal){
   return c.includes("telefon") || c==="";
 }
 
-/* ---------- CHAMADAS RECEBIDAS ---------- */
+/* ---------- CHAMADAS RECEBIDAS ----------
+   Os campos _date/_status/_esp/_dur já vêm pré-calculados de normalizeSheet()
+   (ver SHEET_ENRICHERS) — aqui só filtramos, sem reprocessar linha a linha. */
 function getReceivedFiltered(){
   if(!canalAllows("Receptivo")) return [];
   const rows = state.rows.received || [];
-  return rows.map(r=>({...r, _date: parseDateFlexible(r.data), _status: normalizeStatus(r.status),
-      _esp: toNumber(r.tempoEspera), _dur: toNumber(r.tempoLigacao)}))
-    .filter(r=> inPeriod(r._date) && passesFilters(r));
+  const out = [];
+  for(let i=0;i<rows.length;i++){ const r=rows[i]; if(inPeriod(r._date) && passesFilters(r)) out.push(r); }
+  return out;
 }
 function computeReceivedMetrics(rows){
   const entrantes = rows.length;
@@ -673,6 +741,7 @@ function computeReceivedMetrics(rows){
   });
   let rechamadas = 0;
   Object.values(byClientDay).forEach(c=>{ if(c>1) rechamadas += (c-1); });
+  const pctRechamadas = entrantes? rechamadas/entrantes : NaN;
 
   const transferFeitas = rows.filter(r=>isTransfer(r.transferPara));
   const transferRecebidas = rows.filter(r=>isTransfer(r.transferDe));
@@ -680,17 +749,18 @@ function computeReceivedMetrics(rows){
   return {
     entrantes, atendidas: atendidas.length, naoAtendidas: naoAtendidas.length,
     pctAtendidas20, pctAtendidas60, pctAbandono, pctAtendidas, aproveitamento: pctAtendidas,
-    nivelServico, ctee, tma, tme, rechamadas,
+    nivelServico, ctee, tma, tme, rechamadas, pctRechamadas,
     transferFeitas: transferFeitas.length, transferRecebidas: transferRecebidas.length
   };
 }
 
-/* ---------- CHAMADAS REALIZADAS ---------- */
+/* ---------- CHAMADAS REALIZADAS (aba grande — só filtra, nada de reprocessar) ---------- */
 function getMadeFiltered(){
   if(!canalAllows("Ativo")) return [];
   const rows = state.rows.made || [];
-  return rows.map(r=>({...r, _date: parseDateFlexible(r.data), _status: normalizeStatus(r.status), _dur: toNumber(r.tempoLigacao)}))
-    .filter(r=> inPeriod(r._date) && passesFilters(r));
+  const out = [];
+  for(let i=0;i<rows.length;i++){ const r=rows[i]; if(inPeriod(r._date) && passesFilters(r)) out.push(r); }
+  return out;
 }
 function computeMadeMetrics(rows){
   const total = rows.length;
@@ -709,18 +779,14 @@ function computeMadeMetrics(rows){
 function getChatFiltered(){
   if(!canalAllows("Chat")) return [];
   const rows = state.rows.chat || [];
-  return rows.map(r=>({...r, _date: parseDateFlexible(r.data)}))
-    .filter(r=> inPeriod(r._date) && passesFilters(r));
+  return rows.filter(r=> inPeriod(r._date) && passesFilters(r));
 }
 
 /* ---------- PERFORMANCE CHAT (agregado por agente/dia) ---------- */
 function getChatPerfFiltered(){
   if(!canalAllows("Chat")) return [];
   const rows = state.rows.chatPerf || [];
-  return rows.map(r=>({...r, _date: parseDateFlexible(r.data), _total: toNumber(r.total),
-      _tma: durationToSeconds(r.tma), _tmeResp: durationToSeconds(r.tmeResp),
-      _satMedia: toNumber(r.satisfacaoMedia), _conversasSat: toNumber(r.conversasSat)}))
-    .filter(r=> inPeriod(r._date) && passesFilters(r));
+  return rows.filter(r=> inPeriod(r._date) && passesFilters(r));
 }
 function computeChatPerfMetrics(rows){
   const tmeResp = avg(rows.filter(r=>isFinite(r._tmeResp) && r._tmeResp>0).map(r=>r._tmeResp));
@@ -730,26 +796,26 @@ function computeChatPerfMetrics(rows){
 }
 
 /* ---------- TRANSFERÊNCIAS (fonte: chamadas, não chat) ---------- */
-function computeTransferRanking(){
+function computeTransferSummary(){
   const received = getReceivedFiltered();
   const made = getMadeFiltered();
-  const combined = [...received.map(r=>({agente:r.agente, transferPara:r.transferPara})),
-                    ...made.map(r=>({agente:r.agente, transferPara:r.transferPara}))];
+  const combined = [...received.map(r=>({agente:r.agente, setor:r.setor, transferPara:r.transferPara})),
+                    ...made.map(r=>({agente:r.agente, setor:r.setor, transferPara:r.transferPara}))];
   const feitas = combined.filter(r=>isTransfer(r.transferPara));
-  const porOrigem = groupBy(feitas, r=>r.agente||"—");
-  const origemRank = Array.from(porOrigem, ([agente,list])=>({agente, total:list.length})).sort((a,b)=>b.total-a.total);
 
-  const porDestino = groupBy(feitas, r=>ramalLabel(r.transferPara)||"—");
-  const destinoRank = Array.from(porDestino, ([agente,list])=>({agente, total:list.length})).sort((a,b)=>b.total-a.total);
+  const porAgente = groupBy(feitas, r=>r.agente||"—");
+  const porSetor = groupBy(feitas, r=>r.setor||"—");
+  let topAgente = null, topSetor = null;
+  porAgente.forEach((list,agente)=>{ if(!topAgente || list.length>topAgente.count) topAgente = {agente, count:list.length}; });
+  porSetor.forEach((list,setor)=>{ if(!topSetor || list.length>topSetor.count) topSetor = {setor, count:list.length}; });
 
-  return {totalTransferencias: feitas.length, totalChamadas: combined.length, origemRank, destinoRank};
+  return {totalTransferencias: feitas.length, totalChamadas: combined.length, topAgente, topSetor};
 }
 
 /* ---------- SATISFAÇÃO (CSAT) ---------- */
 function getSatFiltered(){
   const rows = state.rows.satisfaction||[];
-  return rows.map(r=>({...r, _date: parseDateFlexible(r.data), _nota: toNumber(r.nota)}))
-    .filter(r=> inPeriod(r._date) && passesFilters(r) && satCanalMatches(r.canal));
+  return rows.filter(r=> inPeriod(r._date) && passesFilters(r) && satCanalMatches(r.canal));
 }
 function computeCsat(rows){
   const valid = rows.filter(r=>isFinite(r._nota));
@@ -764,8 +830,7 @@ function computeCsat(rows){
 /* ---------- MONITORIA ---------- */
 function getMonFiltered(){
   const rows = state.rows.monitoring||[];
-  return rows.map(r=>({...r, _date: parseDateFlexible(r.data), _nota: toNumber(r.nota)}))
-    .filter(r=> inPeriod(r._date) && passesFilters(r));
+  return rows.filter(r=> inPeriod(r._date) && passesFilters(r));
 }
 function computeMonitoria(rows){
   const valid = rows.filter(r=>isFinite(r._nota));
@@ -779,8 +844,7 @@ function computeMonitoria(rows){
 /* ---------- PAUSAS (duração em segundos) ---------- */
 function getPauseFiltered(){
   const rows = state.rows.pause||[];
-  return rows.map(r=>({...r, _date: parseDateFlexible(r.data), _sec: toNumber(r.duracao)}))
-    .filter(r=> inPeriod(r._date) && passesFilters(r));
+  return rows.filter(r=> inPeriod(r._date) && passesFilters(r));
 }
 function computePausasPorTipo(rows){
   const porTipo = groupBy(rows, r=>r.tipo||"—");
@@ -827,8 +891,7 @@ function computePausasPorAgente(rows){
 /* ---------- ABANDONO MENSAL (aba dedicada) ---------- */
 function getAbandonFiltered(){
   const rows = state.rows.abandonment||[];
-  return rows.map(r=>({...r, _date: parseDateFlexible(r.data), _taxa: computeAbandonRate(r)}))
-    .filter(r=> state.filters.setor==="all" || (r.setor||"")===state.filters.setor);
+  return rows.filter(r=> state.filters.setor==="all" || (r.setor||"")===state.filters.setor);
 }
 function computeAbandonRate(r){
   const t = toNumber(r.taxa);
@@ -855,14 +918,6 @@ function hasAnyData(){
   return Object.keys(SHEETS).some(k=> (state.rows[k]||[]).length>0);
 }
 
-function combinedVolumeRows(){
-  // retorna lista unificada {_date, setor, agente, canal} para as 3 fontes de atendimento
-  const rec = getReceivedFiltered().map(r=>({_date:r._date, setor:r.setor, agente:r.agente, canal:"Receptivo"}));
-  const made = getMadeFiltered().map(r=>({_date:r._date, setor:r.setor, agente:r.agente, canal:"Ativo"}));
-  const chat = getChatFiltered().map(r=>({_date:r._date, setor:r.setor, agente:r.agente, canal:"Chat"}));
-  return [...rec, ...made, ...chat];
-}
-
 /* ---------- RANKING GERAL DE AGENTES ---------- */
 function buildAgentRanking(category){
   const received = getReceivedFiltered();
@@ -884,18 +939,20 @@ function buildAgentRanking(category){
   const list = Array.from(agentSet).map(agente=>{
     const recList = byRec.get(agente)||[];
     const madeList = byMade.get(agente)||[];
+    // "Chamadas realizadas" no ranking só conta atendidas com duração >= 60s (contato real, não caixa postal)
+    const madeValidList = madeList.filter(r=>r._status==="Atendida" && isFinite(r._dur) && r._dur>=60);
     const sList = (bySat.get(agente)||[]).filter(r=>isFinite(r._nota));
     const mList = (byMon.get(agente)||[]).filter(r=>isFinite(r._nota));
-    const total = recList.length + madeList.length;
+    const total = recList.length + madeValidList.length;
     const csat = sList.length ? sList.filter(r=>r._nota>=4).length/sList.length : NaN;
-    const notaMonMedia = mList.length ? avg(mList.map(r=>r._nota)) : NaN;
+    const notaMonMedia = mList.length ? avg(mList.map(r=>r._nota)) : NaN; // já normalizada 0–1 (ver SHEET_ENRICHERS)
     let score;
     if(category==="geral") score = total + (isFinite(csat)?csat*20:0) + (isFinite(notaMonMedia)?notaMonMedia*20:0);
     else if(category==="recebidas") score = recList.length;
-    else if(category==="realizadas") score = madeList.length;
+    else if(category==="realizadas") score = madeValidList.length;
     else if(category==="satisfacao") score = isFinite(csat)? csat*100 : -1;
     else if(category==="monitoria") score = isFinite(notaMonMedia)? notaMonMedia*100 : -1;
-    return {agente, total, recebidas:recList.length, realizadas:madeList.length, csat, notaMonMedia, score};
+    return {agente, total, recebidas:recList.length, realizadas:madeValidList.length, csat, notaMonMedia, score};
   });
   return list.filter(a=>a.score>=0 || category==="geral").sort((a,b)=>b.score-a.score);
 }
@@ -926,7 +983,6 @@ const NAV = [
   {key:"queue", label:"Fila & SLA", icon:ICONS.queue},
   {key:"chat", label:"Chat & Transferências", icon:ICONS.chat},
   {key:"pause", label:"Pausas", icon:ICONS.pause},
-  {key:"detail", label:"Detalhado", icon:ICONS.detail},
 ];
 const NAV_CONFIG = {key:"config", label:"Configuração", icon:ICONS.config};
 
@@ -954,7 +1010,7 @@ function goToScreen(key){
   currentScreen = key;
   renderNav();
   const titles = {overview:"Visão Geral", sector:"Por Setor", ranking:"Ranking de Agentes",
-    queue:"Fila & SLA", chat:"Chat & Transferências", pause:"Pausas", detail:"Visão Detalhada", config:"Configuração de Dados"};
+    queue:"Fila & SLA", chat:"Chat & Transferências", pause:"Pausas", config:"Configuração de Dados"};
   document.getElementById('screenTitle').textContent = titles[key] || key;
   renderGlobalFilters();
   renderScreen();
@@ -966,17 +1022,14 @@ function renderGlobalFilters(){
   if(currentScreen==="config" || !hasAnyData()){ box.innerHTML = ""; return; }
   const setores = allSetores();
   const agentes = allAgentes();
+  const months = allMonthsAvailable();
   box.innerHTML = `
     <select class="filter-select" id="fPeriod">
-      <option value="all">Todo o período</option>
-      <option value="today">Hoje</option>
-      <option value="7d">Últimos 7 dias</option>
-      <option value="30d">Últimos 30 dias</option>
-      <option value="month">Este mês</option>
-      <option value="lastmonth">Mês passado</option>
+      <option value="all">Todos os meses</option>
+      ${months.map(m=>`<option value="${m}">${monthLabelFromISO(m)}</option>`).join("")}
     </select>
     <select class="filter-select" id="fSetor"><option value="all">Todos os setores</option>${setores.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join("")}</select>
-    ${currentScreen==="detail"||currentScreen==="ranking"||currentScreen==="pause" ? `<select class="filter-select" id="fAgente"><option value="all">Todos os agentes</option>${agentes.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join("")}</select>` : ""}
+    ${currentScreen==="ranking"||currentScreen==="pause" ? `<select class="filter-select" id="fAgente"><option value="all">Todos os agentes</option>${agentes.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join("")}</select>` : ""}
     ${currentScreen!=="pause" ? `<select class="filter-select" id="fCanal"><option value="all">Todos os canais</option><option value="Receptivo">Receptivo</option><option value="Ativo">Ativo</option><option value="Chat">Chat</option></select>` : ""}
     <button class="btn btn-ghost btn-sm" id="btnRefresh">↻ Atualizar dados</button>
   `;
@@ -1012,7 +1065,6 @@ function renderScreen(){
   else if(currentScreen==="queue") content.innerHTML = renderQueue();
   else if(currentScreen==="chat") content.innerHTML = renderChat();
   else if(currentScreen==="pause") content.innerHTML = renderPause();
-  else if(currentScreen==="detail") content.innerHTML = renderDetail();
 
   bindScreenEvents();
 }
@@ -1094,48 +1146,75 @@ function renderOverview(){
   `;
 }
 function afterRenderOverview(){
-  const combined = combinedVolumeRows().filter(r=>r._date);
-  const sat = computeCsat(getSatFiltered());
+  try{
+    const received = getReceivedFiltered();
+    const made = getMadeFiltered();
+    const chatRows = getChatFiltered();
+    const sat = computeCsat(getSatFiltered());
 
-  // mix por mês
-  const byMonth = groupBy(combined, r=>monthKey(r._date));
-  const months = Array.from(byMonth.keys()).sort((a,b)=>{
-    const pa=byMonth.get(a)[0]._date, pb=byMonth.get(b)[0]._date; return pa-pb;
-  });
-  const seriesFor = canal => months.map(m=> byMonth.get(m).filter(r=>r.canal===canal).length);
-  charts.overviewMix = new Chart(document.getElementById('chOverviewMix'), {
-    type:'bar',
-    data:{labels: months, datasets:[
-      {label:'Receptivo', data: seriesFor('Receptivo'), backgroundColor:'#7063F0', borderRadius:5},
-      {label:'Ativo', data: seriesFor('Ativo'), backgroundColor:'#FF7029', borderRadius:5},
-      {label:'Chat', data: seriesFor('Chat'), backgroundColor:'#1C1F26', borderRadius:5},
-    ]},
-    options: {...baseChartOpts(), plugins:{legend:{display:true, position:'bottom', labels:{boxWidth:10,font:{size:11}}}},
-      scales:{x:{...baseChartOpts().scales.x, stacked:false}, y:{...baseChartOpts().scales.y}}}
-  });
+    // Agregação em um único passe por fonte (evita criar arrays gigantes de objetos novos)
+    const monthMap = new Map();   // "2026-01" -> {Receptivo,Ativo,Chat,_date}
+    const weekday = [0,0,0,0,0,0,0];
+    const setorMap = new Map();
 
-  const byWeekday = [0,0,0,0,0,0,0];
-  combined.forEach(r=>{ byWeekday[r._date.getDay()]++; });
-  const wLabels = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
-  charts.overviewWeekday = new Chart(document.getElementById('chOverviewWeekday'), {
-    type:'bar',
-    data:{labels:wLabels, datasets:[{label:'Atendimentos', data:byWeekday, backgroundColor:'#7063F0', borderRadius:6}]},
-    options: baseChartOpts()
-  });
+    function tally(rows, canalKey){
+      for(let i=0;i<rows.length;i++){
+        const r = rows[i];
+        const d = r._date;
+        if(!d) continue;
+        const mk = monthKeyISO(d);
+        if(!monthMap.has(mk)) monthMap.set(mk, {Receptivo:0, Ativo:0, Chat:0, _date:d});
+        monthMap.get(mk)[canalKey]++;
+        weekday[d.getDay()]++;
+        const s = r.setor || "—";
+        setorMap.set(s, (setorMap.get(s)||0)+1);
+      }
+    }
+    tally(received, "Receptivo");
+    tally(made, "Ativo");
+    tally(chatRows, "Chat");
 
-  charts.overviewSat = new Chart(document.getElementById('chOverviewSat'), {
-    type:'bar',
-    data:{labels:['1','2','3','4','5'], datasets:[{label:'Avaliações', data:sat.dist, backgroundColor:['#EF4444','#F59E0B','#FBBF24','#84CC16','#22C55E'], borderRadius:6}]},
-    options: baseChartOpts()
-  });
+    const months = Array.from(monthMap.keys()).sort();
+    const monthLabels = months.map(m=>monthLabelShort(monthMap.get(m)._date));
 
-  const bySetor = groupBy(combined, r=>r.setor||"—");
-  const setorLabels = Array.from(bySetor.keys()).sort((a,b)=>bySetor.get(b).length-bySetor.get(a).length);
-  charts.overviewSetor = new Chart(document.getElementById('chOverviewSetor'), {
-    type:'bar',
-    data:{labels:setorLabels, datasets:[{data:setorLabels.map(s=>bySetor.get(s).length), backgroundColor:'#FF7029', borderRadius:6}]},
-    options: {...baseChartOpts(), indexAxis:'y'}
-  });
+    try{
+      charts.overviewMix = new Chart(document.getElementById('chOverviewMix'), {
+        type:'bar',
+        data:{labels: monthLabels, datasets:[
+          {label:'Receptivo', data: months.map(m=>monthMap.get(m).Receptivo), backgroundColor:'#7063F0', borderRadius:5},
+          {label:'Ativo', data: months.map(m=>monthMap.get(m).Ativo), backgroundColor:'#FF7029', borderRadius:5},
+          {label:'Chat', data: months.map(m=>monthMap.get(m).Chat), backgroundColor:'#1C1F26', borderRadius:5},
+        ]},
+        options: {...baseChartOpts(), plugins:{legend:{display:true, position:'bottom', labels:{boxWidth:10,font:{size:11}}}}}
+      });
+    }catch(e){ console.error("chOverviewMix", e); }
+
+    try{
+      const wLabels = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+      charts.overviewWeekday = new Chart(document.getElementById('chOverviewWeekday'), {
+        type:'bar',
+        data:{labels:wLabels, datasets:[{label:'Atendimentos', data:weekday, backgroundColor:'#7063F0', borderRadius:6}]},
+        options: baseChartOpts()
+      });
+    }catch(e){ console.error("chOverviewWeekday", e); }
+
+    try{
+      charts.overviewSat = new Chart(document.getElementById('chOverviewSat'), {
+        type:'bar',
+        data:{labels:['1','2','3','4','5'], datasets:[{label:'Avaliações', data:sat.dist, backgroundColor:['#EF4444','#F59E0B','#FBBF24','#84CC16','#22C55E'], borderRadius:6}]},
+        options: baseChartOpts()
+      });
+    }catch(e){ console.error("chOverviewSat", e); }
+
+    try{
+      const setorLabels = Array.from(setorMap.keys()).sort((a,b)=>setorMap.get(b)-setorMap.get(a));
+      charts.overviewSetor = new Chart(document.getElementById('chOverviewSetor'), {
+        type:'bar',
+        data:{labels:setorLabels, datasets:[{data:setorLabels.map(s=>setorMap.get(s)), backgroundColor:'#FF7029', borderRadius:6}]},
+        options: {...baseChartOpts(), indexAxis:'y'}
+      });
+    }catch(e){ console.error("chOverviewSetor", e); }
+  }catch(e){ console.error("afterRenderOverview", e); }
 }
 /* ============================================================
    TELA: POR SETOR
@@ -1202,27 +1281,34 @@ function renderSector(){
   `;
 }
 function afterRenderSector(){
-  const setores = state.filters.setor==="all" ? allSetores() : [state.filters.setor];
-  const received = getReceivedFiltered();
-  const made = getMadeFiltered();
-  const chatRows = getChatFiltered();
-  const sats = getSatFiltered();
-  const byRecSetor = groupBy(received, r=>r.setor||"—");
-  const byMadeSetor = groupBy(made, r=>r.setor||"—");
-  const byChatSetor = groupBy(chatRows, r=>r.setor||"—");
-  const bySatSetor = groupBy(sats, r=>r.setor||"—");
+  try{
+    const setores = state.filters.setor==="all" ? allSetores() : [state.filters.setor];
+    const received = getReceivedFiltered();
+    const made = getMadeFiltered();
+    const chatRows = getChatFiltered();
+    const sats = getSatFiltered();
+    const byRecSetor = groupBy(received, r=>r.setor||"—");
+    const byMadeSetor = groupBy(made, r=>r.setor||"—");
+    const byChatSetor = groupBy(chatRows, r=>r.setor||"—");
+    const bySatSetor = groupBy(sats, r=>r.setor||"—");
 
-  const vol = setores.map(s=>(byRecSetor.get(s)||[]).length + (byMadeSetor.get(s)||[]).length + (byChatSetor.get(s)||[]).length);
-  const csat = setores.map(s=>{ const c = computeCsat(bySatSetor.get(s)||[]).csat; return isFinite(c)?c*100:0; });
+    const vol = setores.map(s=>(byRecSetor.get(s)||[]).length + (byMadeSetor.get(s)||[]).length + (byChatSetor.get(s)||[]).length);
+    const csat = setores.map(s=>{ const c = computeCsat(bySatSetor.get(s)||[]).csat; return isFinite(c)?c*100:0; });
 
-  charts.sectorVolume = new Chart(document.getElementById('chSectorVolume'), {
-    type:'bar', data:{labels:setores, datasets:[{data:vol, backgroundColor:'#7063F0', borderRadius:6}]},
-    options: baseChartOpts()
-  });
-  charts.sectorCsat = new Chart(document.getElementById('chSectorCsat'), {
-    type:'bar', data:{labels:setores, datasets:[{data:csat, backgroundColor:'#FF7029', borderRadius:6}]},
-    options: {...baseChartOpts(), scales:{...baseChartOpts().scales, y:{...baseChartOpts().scales.y, max:100}}}
-  });
+    try{
+      charts.sectorVolume = new Chart(document.getElementById('chSectorVolume'), {
+        type:'bar', data:{labels:setores, datasets:[{data:vol, backgroundColor:'#7063F0', borderRadius:6}]},
+        options: baseChartOpts()
+      });
+    }catch(e){ console.error("chSectorVolume", e); }
+
+    try{
+      charts.sectorCsat = new Chart(document.getElementById('chSectorCsat'), {
+        type:'bar', data:{labels:setores, datasets:[{data:csat, backgroundColor:'#FF7029', borderRadius:6}]},
+        options: {...baseChartOpts(), scales:{...baseChartOpts().scales, y:{...baseChartOpts().scales.y, max:100}}}
+      });
+    }catch(e){ console.error("chSectorCsat", e); }
+  }catch(e){ console.error("afterRenderSector", e); }
 }
 
 /* ============================================================
@@ -1241,6 +1327,7 @@ function renderRanking(){
   <div class="ranking-tabs">
     ${RANK_TABS.map(t=>`<button class="rtab ${rankingCategory===t.key?'active':''}" data-rank-tab="${t.key}">${t.icon}${t.label}</button>`).join("")}
   </div>
+  ${rankingCategory==="realizadas" ? `<p class="kpi-sub" style="margin-bottom:12px;">Considera apenas chamadas realizadas <b>atendidas</b> com duração <b>igual ou superior a 60s</b> (chamadas mais curtas costumam ser caixa postal).</p>` : ""}
   <div class="rank-list">
     ${list.length===0 ? `<div class="empty-state"><h3>Sem dados suficientes para este ranking</h3></div>` :
       list.slice(0,50).map((a,i)=>rankRow(a,i)).join("")}
@@ -1292,13 +1379,12 @@ function renderQueue(){
     ${kpiCard("Atendidas em até 20s", fmtPct(rm.pctAtendidas20))}
     ${kpiCard("Atendidas em até 60s", fmtPct(rm.pctAtendidas60))}
     ${kpiCard("Abandonadas na fila", fmtPct(rm.pctAbandono))}
-    ${kpiCard("Atendidas na fila", fmtPct(rm.pctAtendidas))}
     ${kpiCard("Aproveitamento", fmtPct(rm.aproveitamento), "atendidas / demanda total do setor")}
-    ${kpiCard("Nível de Serviço", fmtPct(rm.nivelServico/100))}
+    ${kpiCard("Nível de Serviço", fmtPct(rm.nivelServico/100), "Atendidas em até 20s × 100 / (atendidas + abandonadas na fila)")}
     ${kpiCard("CTEE", fmtPct(rm.ctee/100), "atendidas com espera > 5s")}
     ${kpiCard("TME", fmtSec(rm.tme))}
     ${kpiCard("TMA", fmtSec(rm.tma))}
-    ${kpiCard("Rechamadas", fmtNum(rm.rechamadas), "mesmo cliente, mesmo dia")}
+    ${kpiCard("Rechamadas", fmtPct(rm.pctRechamadas), "sobre o total de entrantes na fila")}
     ${kpiCard("Taxa de contato (ativo)", fmtPct(mm.taxaContato/100))}
   </div>
 
@@ -1313,7 +1399,7 @@ function renderQueue(){
     <div class="table-wrap"><table class="data-table" id="tblQueue">
       <thead><tr>
         <th>Setor</th><th>Entrantes</th><th>≤20s</th><th>≤60s</th><th>% Abandono</th><th>% Atendidas</th>
-        <th>Nível Serviço</th><th>CTEE</th><th>Rechamadas</th>
+        <th>Nível Serviço</th><th>CTEE</th><th>% Rechamadas</th>
       </tr></thead>
       <tbody>
         ${rows.map(r=>`<tr>
@@ -1325,7 +1411,7 @@ function renderQueue(){
           <td>${fmtPct(r.pctAtendidas)}</td>
           <td>${fmtPct(r.nivelServico/100)}</td>
           <td>${fmtPct(r.ctee/100)}</td>
-          <td>${fmtNum(r.rechamadas)}</td>
+          <td>${fmtPct(r.pctRechamadas)}</td>
         </tr>`).join("")}
       </tbody>
     </table></div>
@@ -1336,24 +1422,22 @@ function renderQueue(){
   `;
 }
 function afterRenderQueue(){
-  const rows = getAbandonFiltered();
-  if(!rows.length){ const c = document.getElementById('chAbandonTrend'); if(c) c.parentElement.innerHTML = '<p class="kpi-sub">Sem dados na aba Taxa de Abandono para o filtro atual.</p>'; return; }
-  const bySetor = groupBy(rows.filter(r=>r._date), r=>r.setor||"—");
-  const allMonths = Array.from(new Set(rows.filter(r=>r._date).map(r=>monthKey(r._date))));
-  allMonths.sort((a,b)=>{
-    const ra = rows.find(r=>r._date && monthKey(r._date)===a)._date;
-    const rb = rows.find(r=>r._date && monthKey(r._date)===b)._date;
-    return ra-rb;
-  });
-  const palette = ['#7063F0','#FF7029','#1C1F26','#22C55E','#F59E0B'];
-  const datasets = Array.from(bySetor.keys()).map((s,i)=>({
-    label:s, data: allMonths.map(m=>{ const r = bySetor.get(s).find(x=>monthKey(x._date)===m); return r? r._taxa*100 : null; }),
-    borderColor:palette[i%palette.length], backgroundColor:palette[i%palette.length]+'22', tension:.3, fill:false
-  }));
-  charts.abandonTrend = new Chart(document.getElementById('chAbandonTrend'), {
-    type:'line', data:{labels:allMonths, datasets},
-    options:{...baseChartOpts(), plugins:{legend:{display:true, position:'bottom', labels:{boxWidth:10,font:{size:11}}}}}
-  });
+  try{
+    const rows = getAbandonFiltered();
+    if(!rows.length){ const c = document.getElementById('chAbandonTrend'); if(c) c.parentElement.innerHTML = '<p class="kpi-sub">Sem dados na aba Taxa de Abandono para o filtro atual.</p>'; return; }
+    const validRows = rows.filter(r=>r._date);
+    const bySetor = groupBy(validRows, r=>r.setor||"—");
+    const allMonths = Array.from(new Set(validRows.map(r=>monthKeyISO(r._date)))).sort();
+    const palette = ['#7063F0','#FF7029','#1C1F26','#22C55E','#F59E0B'];
+    const datasets = Array.from(bySetor.keys()).map((s,i)=>({
+      label:s, data: allMonths.map(m=>{ const r = bySetor.get(s).find(x=>monthKeyISO(x._date)===m); return r? r._taxa*100 : null; }),
+      borderColor:palette[i%palette.length], backgroundColor:palette[i%palette.length]+'22', tension:.3, fill:false
+    }));
+    charts.abandonTrend = new Chart(document.getElementById('chAbandonTrend'), {
+      type:'line', data:{labels:allMonths.map(m=>monthLabelFromISO(m)), datasets},
+      options:{...baseChartOpts(), plugins:{legend:{display:true, position:'bottom', labels:{boxWidth:10,font:{size:11}}}}}
+    });
+  }catch(e){ console.error("afterRenderQueue", e); }
 }
 
 /* ============================================================
@@ -1364,7 +1448,7 @@ function renderChat(){
   const perfRows = getChatPerfFiltered();
   const pm = computeChatPerfMetrics(perfRows);
   const satChat = computeCsat(getSatFiltered());
-  const tr = computeTransferRanking();
+  const tr = computeTransferSummary();
 
   return `
   <div class="section-title"><span class="chev">›</span> Performance do Chat</div>
@@ -1376,27 +1460,14 @@ function renderChat(){
   </div>
 
   <div class="note-box" style="margin-top:14px;">
-    As transferências são registradas nas abas de <b>Chamadas Recebidas/Realizadas</b> (campo "Transferiu para"), não no chat —
-    por isso o ranking abaixo usa apenas dados de chamada.
+    As transferências são registradas nas abas de <b>Chamadas Recebidas/Realizadas</b> (campo "Transferiu para"), não no chat.
   </div>
 
   <div class="section-title"><span class="chev">›</span> Transferências entre agentes (chamadas)</div>
-  <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr));">
-    ${kpiCard("Total de transferências", fmtNum(tr.totalTransferencias))}
+  <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));">
+    ${kpiCard("Setor que mais transfere", tr.topSetor?esc(tr.topSetor.setor):"—", tr.topSetor?fmtNum(tr.topSetor.count)+" transferências":"")}
+    ${kpiCard("Agente que mais transfere", tr.topAgente?esc(tr.topAgente.agente):"—", tr.topAgente?fmtNum(tr.topAgente.count)+" transferências":"")}
     ${kpiCard("Taxa de transferência", fmtPct(tr.totalChamadas? tr.totalTransferencias/tr.totalChamadas : NaN), "sobre o total de chamadas")}
-  </div>
-  <div class="grid-2" style="margin-top:14px;">
-    <div class="card">
-      <div class="card-title">Quem mais transfere <small>agente de origem</small></div>
-      <div class="table-wrap"><table class="data-table"><thead><tr><th>Agente</th><th>Transferências feitas</th></tr></thead>
-      <tbody>${tr.origemRank.length? tr.origemRank.slice(0,15).map(r=>`<tr><td>${esc(r.agente)}</td><td>${fmtNum(r.total)}</td></tr>`).join("") : `<tr><td colspan="2" style="color:var(--text-muted)">Sem transferências no período/filtro</td></tr>`}</tbody></table></div>
-    </div>
-    <div class="card">
-      <div class="card-title">Quem mais recebe <small>por ramal/extensão de destino</small></div>
-      <div class="table-wrap"><table class="data-table"><thead><tr><th>Destino</th><th>Transferências recebidas</th></tr></thead>
-      <tbody>${tr.destinoRank.length? tr.destinoRank.slice(0,15).map(r=>`<tr><td>${esc(r.agente)}</td><td>${fmtNum(r.total)}</td></tr>`).join("") : `<tr><td colspan="2" style="color:var(--text-muted)">Sem transferências no período/filtro</td></tr>`}</tbody></table></div>
-      <p class="kpi-sub" style="margin-top:8px;">O campo "Transferiu para" traz o ramal, não o nome do agente. Cadastre o mapeamento de ramais em <b>Configuração</b> para exibir nomes aqui.</p>
-    </div>
   </div>
   `;
 }
@@ -1464,78 +1535,30 @@ function renderPause(){
   `;
 }
 function afterRenderPause(){
-  const rows = getPauseFiltered();
-  const tipos = computePausasPorTipo(rows);
-  charts.pauseType = new Chart(document.getElementById('chPauseType'), {
-    type:'bar',
-    data:{labels: tipos.map(t=>t.tipo), datasets:[{data: tipos.map(t=>t.totalSec/60), backgroundColor:'#7063F0', borderRadius:6}]},
-    options:{...baseChartOpts(), indexAxis:'y',
-      plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>fmtSec(c.raw*60)}}}}
-  });
-}
-
-/* ============================================================
-   TELA: DETALHADO
-   ============================================================ */
-function renderDetail(){
-  const rec = getReceivedFiltered().map(r=>({...r, _canal:"Receptivo"}));
-  const made = getMadeFiltered().map(r=>({...r, _canal:"Ativo"}));
-  const chatRows = getChatFiltered().map(r=>({...r, _canal:"Chat"}));
-
-  const byKey = groupBy([...rec.filter(r=>r._date), ...made.filter(r=>r._date), ...chatRows.filter(r=>r._date)],
-    r=> [r.setor||"—", r.agente||"—", r._canal, monthKey(r._date)].join("|"));
-
-  let rows = Array.from(byKey, ([key, list])=>{
-    const [setor,agente,canal,mes] = key.split("|");
-    const volume = list.length;
-    let extra = {};
-    if(canal==="Receptivo") extra = computeReceivedMetrics(list);
-    else if(canal==="Ativo") extra = computeMadeMetrics(list);
-    return {setor, agente, canal, mes, volume, ...extra};
-  });
-
-  const tid = "tblDetail";
-  const ss = sortState[tid];
-  if(ss){
-    rows.sort((a,b)=>{
-      const va=a[ss.col], vb=b[ss.col];
-      if(typeof va==="string") return ss.dir*String(va).localeCompare(String(vb));
-      return ss.dir*((va||0)-(vb||0));
+  try{
+    const rows = getPauseFiltered();
+    const tipos = computePausasPorTipo(rows);
+    charts.pauseType = new Chart(document.getElementById('chPauseType'), {
+      type:'bar',
+      data:{labels: tipos.map(t=>t.tipo), datasets:[{data: tipos.map(t=>t.totalSec/60), backgroundColor:'#7063F0', borderRadius:6}]},
+      options:{...baseChartOpts(), indexAxis:'y',
+        plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>fmtSec(c.raw*60)}}}}
     });
-  } else {
-    rows.sort((a,b)=>b.volume-a.volume);
-  }
-
-  return `
-  <div class="section-title"><span class="chev">›</span> Todos os indicadores — por mês, setor, agente e canal</div>
-  <div class="card">
-    <div class="table-wrap"><table class="data-table" id="${tid}">
-      <thead><tr>
-        <th data-sort="mes">Mês</th><th data-sort="setor">Setor</th><th data-sort="agente">Agente</th><th data-sort="canal">Canal</th>
-        <th data-sort="volume">Volume</th><th data-sort="pctAbandono">% Abandono</th><th data-sort="tma">TMA</th><th data-sort="tme">TME</th>
-        <th data-sort="nivelServico">N. Serviço</th><th data-sort="rechamadas">Rechamadas</th>
-      </tr></thead>
-      <tbody>
-        ${rows.map(r=>`<tr>
-          <td>${esc(r.mes)}</td><td>${esc(r.setor)}</td><td>${esc(r.agente)}</td><td>${esc(r.canal)}</td>
-          <td>${fmtNum(r.volume)}</td>
-          <td>${isFinite(r.pctAbandono)?fmtPct(r.pctAbandono):"—"}</td>
-          <td>${isFinite(r.tma)?fmtSec(r.tma):"—"}</td>
-          <td>${isFinite(r.tme)?fmtSec(r.tme):"—"}</td>
-          <td>${isFinite(r.nivelServico)?fmtPct(r.nivelServico/100):"—"}</td>
-          <td>${isFinite(r.rechamadas)?fmtNum(r.rechamadas):"—"}</td>
-        </tr>`).join("")}
-      </tbody>
-    </table></div>
-    <p class="kpi-sub" style="margin-top:10px;">Clique nos títulos das colunas para ordenar. ${rows.length} linhas no período/filtro selecionado. Colunas específicas de fila (% Abandono, TME, N. Serviço, Rechamadas) só se aplicam ao canal Receptivo.</p>
-  </div>
-  `;
+  }catch(e){ console.error("afterRenderPause", e); }
 }
 /* ============================================================
    TELA: CONFIGURAÇÃO
    ============================================================ */
 function renderConfigScreen(){
   const blocks = Object.keys(SHEETS).map(key=>configBlock(key)).join("");
+  const urlCount = Object.values(state.urls).filter(u=>u && u.trim()).length;
+  const loadedCount = Object.keys(SHEETS).filter(k=>(state.raw[k]||[]).length>0).length;
+  const pendingBanner = (urlCount>0 && loadedCount<urlCount) ? `
+    <div class="note-box">
+      Você tem <b>${urlCount}</b> fonte${urlCount>1?'s':''} com link salvo e <b>${loadedCount}</b> já carregada${loadedCount===1?'':'s'} nesta sessão.
+      Os links ficam salvos mesmo que o carregamento não seja concluído — clique em "Carregar / Atualizar todas as fontes" quando quiser buscar os dados.
+      Isso não acontece mais automaticamente ao abrir o painel, justamente para não travar a tela toda vez com abas grandes.
+    </div>` : "";
   return `
   <div class="note-box">
     <b>Como conectar sua planilha:</b> no Google Sheets, vá em <i>Arquivo → Compartilhar → Publicar na Web</i>,
@@ -1543,18 +1566,8 @@ function renderConfigScreen(){
     O painel busca os dados direto da planilha — quando ela for atualizada, clique em "Atualizar dados" para recarregar.
     O mapeamento de colunas é sugerido automaticamente quando os nomes das colunas da sua planilha batem com os padrões usuais.
   </div>
+  ${pendingBanner}
   ${blocks}
-
-  <div class="config-block">
-    <h3>Mapeamento de ramais (opcional)</h3>
-    <p class="hint">O campo "Transferiu para" das chamadas traz o número do ramal, não o nome do agente. Cadastre aqui a relação ramal → agente para que o ranking de transferências recebidas mostre nomes.</p>
-    <div id="ramalList"></div>
-    <div class="config-row">
-      <input type="text" style="max-width:120px;flex:none;" placeholder="Ramal (ex: 4006)" id="ramalKeyInput">
-      <input type="text" placeholder="Nome do agente" id="ramalValInput">
-      <button class="btn btn-ghost btn-sm" id="btnAddRamal">Adicionar</button>
-    </div>
-  </div>
 
   <div class="config-row" style="margin-top:8px;">
     <button class="btn btn-primary" id="btnLoadAll">Carregar / Atualizar todas as fontes</button>
@@ -1597,22 +1610,8 @@ function mappingUI(key, sheet, headers, mapping){
       </div>`).join("")}
   </div>`;
 }
-function renderRamalList(){
-  const box = document.getElementById('ramalList');
-  if(!box) return;
-  const entries = Object.entries(state.ramalMap);
-  box.innerHTML = entries.length ? `<div class="map-grid" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr));margin-bottom:10px;">
-    ${entries.map(([k,v])=>`<div class="pill pill-purple" style="display:flex;justify-content:space-between;gap:8px;padding:6px 10px;">
-      <span>${esc(k)} → ${esc(v)}</span><span data-del-ramal="${esc(k)}" style="cursor:pointer;font-weight:800;">×</span>
-    </div>`).join("")}
-  </div>` : `<p class="kpi-sub" style="margin-bottom:10px;">Nenhum ramal cadastrado ainda.</p>`;
-  box.querySelectorAll('[data-del-ramal]').forEach(el=>{
-    el.addEventListener('click', ()=>{ delete state.ramalMap[el.dataset.delRamal]; saveConfig(); renderRamalList(); renderScreen(); });
-  });
-}
 
 function bindConfigEvents(){
-  renderRamalList();
   document.querySelectorAll('[data-url-input]').forEach(inp=>{
     inp.addEventListener('change', ()=>{ state.urls[inp.dataset.urlInput] = inp.value; saveConfig(); });
   });
@@ -1652,25 +1651,20 @@ function bindConfigEvents(){
       updateSidebarStatus();
     });
   });
-  document.getElementById('btnAddRamal')?.addEventListener('click', ()=>{
-    const k = document.getElementById('ramalKeyInput').value.trim();
-    const v = document.getElementById('ramalValInput').value.trim();
-    if(k && v){
-      state.ramalMap[k] = v;
-      saveConfig();
-      document.getElementById('ramalKeyInput').value = "";
-      document.getElementById('ramalValInput').value = "";
-      renderRamalList();
-    }
-  });
   document.getElementById('btnLoadAll')?.addEventListener('click', loadAllSheets);
   document.getElementById('btnSaveConfig')?.addEventListener('click', ()=>{ saveConfig(); alert('Configuração salva.'); });
 }
 function normalizeSheetIfMapped(key){ if(state.mapping[key]) normalizeSheet(key); }
 
 async function loadSheetWithFeedback(key){
+  loadGeneration++;
+  const myGen = loadGeneration;
   showLoading(`Carregando ${SHEETS[key].label}...`);
-  const res = await fetchSheet(key);
+  const res = await fetchSheet(key, count=>{
+    if(myGen!==loadGeneration) return;
+    showLoading(`Carregando ${SHEETS[key].label}... ${count.toLocaleString('pt-BR')} linhas`);
+  });
+  if(myGen!==loadGeneration) return; // foi cancelado — não sobrescreve o que o usuário está vendo agora
   hideLoading();
   if(!res.ok){
     const ta = document.querySelector(`[data-paste-area="${key}"]`);
@@ -1679,7 +1673,10 @@ async function loadSheetWithFeedback(key){
     if(block && !block.querySelector('.fetch-error-note')){
       const note = document.createElement('div');
       note.className = 'note-box warn fetch-error-note';
-      note.innerHTML = `Não foi possível buscar esse link automaticamente (provavelmente CORS ou link não publicado). Use "Colar CSV manualmente" acima como alternativa.`;
+      const msg = res.reason==="timeout"
+        ? `O carregamento passou de 2min30 e foi interrompido automaticamente. Se essa aba for muito grande, considere republicar só as colunas necessárias (ou uma versão resumida por dia/agente), ou use "Colar CSV manualmente" abaixo.`
+        : `Não foi possível buscar esse link automaticamente (provavelmente CORS, link não publicado, ou a rede caiu no meio do carregamento). Use "Colar CSV manualmente" acima como alternativa.`;
+      note.innerHTML = msg;
       block.appendChild(note);
     }
   } else {
@@ -1690,17 +1687,38 @@ async function loadSheetWithFeedback(key){
   updateSidebarStatus();
 }
 async function loadAllSheets(){
-  showLoading("Carregando todas as fontes...");
+  loadGeneration++;
+  const myGen = loadGeneration;
   for(const key of Object.keys(SHEETS)){
-    if(state.urls[key]) await fetchSheet(key);
+    if(myGen!==loadGeneration) return; // cancelado no meio do processo
+    if(state.urls[key]){
+      showLoading(`Carregando ${SHEETS[key].label}...`);
+      const res = await fetchSheet(key, count=>{
+        if(myGen!==loadGeneration) return;
+        showLoading(`Carregando ${SHEETS[key].label}... ${count.toLocaleString('pt-BR')} linhas`);
+      });
+      if(myGen!==loadGeneration) return; // cancelado durante esta aba
+      if(res.ok) normalizeSheetIfMapped(key);
+      else if(res.reason==="timeout"){
+        showLoading(`${SHEETS[key].label} demorou demais e foi pulada (mais de 2min30). Tentando a próxima...`);
+        await new Promise(r=>setTimeout(r, 1200));
+      }
+    }
   }
-  normalizeAllSheets();
+  if(myGen!==loadGeneration) return;
   saveConfig();
   hideLoading();
   renderScreen();
   updateSidebarStatus();
 }
 async function refreshAllData(){ await loadAllSheets(); }
+
+function cancelLoading(){
+  loadGeneration++; // invalida qualquer callback pendente de carregamentos em andamento
+  hideLoading();
+  renderScreen();
+  updateSidebarStatus();
+}
 
 function showLoading(text){
   document.getElementById('loadingText').textContent = text;
@@ -1729,21 +1747,26 @@ renderScreen = function(){
 
 /* ============================================================
    BOOTSTRAP
+   ------------------------------------------------------------
+   Importante: NÃO recarregamos as fontes automaticamente ao abrir
+   o painel. Antes, isso fazia o app tentar buscar a aba pesada de
+   novo sozinho a cada visita — se travasse, a tela de carregamento
+   ficava por cima da Configuração antes mesmo dela mostrar os links
+   salvos, dando a impressão de que os links tinham desaparecido.
+   Agora: ao abrir, só carregamos os links/mapeamentos salvos e
+   mostramos a tela de Configuração com eles visíveis. Os dados só
+   são buscados quando você clica em "Carregar" — de forma explícita
+   e cancelável.
    ============================================================ */
 async function initApp(){
   renderNav();
-  goToScreen("config");
   await loadConfig();
-  if(Object.keys(state.urls).length){
-    await loadAllSheets();
-    goToScreen(hasAnyData() ? "overview" : "config");
-  } else {
-    renderScreen();
-  }
+  goToScreen("config");
   updateSidebarStatus();
   document.getElementById('menuToggle').addEventListener('click', ()=>{
     document.getElementById('sidebar').classList.toggle('open');
   });
+  document.getElementById('btnCancelLoad').addEventListener('click', cancelLoading);
 }
 window.addEventListener('DOMContentLoaded', initApp);
 
