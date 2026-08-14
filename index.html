@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Agility Insights — Painel de Atendimento</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Inter:wght@400;500;600;700&display=swap');
 
@@ -1445,6 +1444,32 @@ function badgeFor(v, goodThreshold){
 const SETOR_PALETTE = ['#7063F0','#FF7029','#22C55E','#F5A623','#0EA5E9','#EF4444','#A855F7','#14B8A6','#F43F5E','#84CC16','#9CA3AF','#C97B4A'];
 function colorForIndex(i){ return SETOR_PALETTE[i % SETOR_PALETTE.length]; }
 
+function rankingTableCard(title, headers, rows, opts={}){
+  const limit = opts.limit || 20;
+  const emptyText = opts.emptyText || "Sem dados suficientes para exibir este ranking.";
+  if(!rows || !rows.length) return "";
+  const body = rows.slice(0,limit).map((r,i)=>{
+    const cells = r.map((v,j)=>{
+      const first = j===0;
+      return `<td>${first && opts.boldFirst ? `<b>${esc(v)}</b>` : v}</td>`;
+    }).join("");
+    return `<tr><td style="font-weight:800;color:${i<3?'var(--purple)':'var(--text-muted)'};">${i+1}º</td>${cells}</tr>`;
+  }).join("");
+  return `<div class="card"><div class="card-title">${title}</div>
+    <div class="table-wrap"><table class="data-table">
+      <thead><tr><th>#</th>${headers.map(h=>`<th>${h}</th>`).join("")}</tr></thead>
+      <tbody>${body || `<tr><td colspan="${headers.length+1}" style="color:var(--text-muted)">${emptyText}</td></tr>`}</tbody>
+    </table></div></div>`;
+}
+function simpleTableCard(title, headers, rows){
+  if(!rows || !rows.length) return "";
+  return `<div class="card"><div class="card-title">${title}</div>
+    <div class="table-wrap"><table class="data-table">
+      <thead><tr>${headers.map(h=>`<th>${h}</th>`).join("")}</tr></thead>
+      <tbody>${rows.map(r=>`<tr>${r.map((v,j)=>`<td>${j===0?`<b>${esc(v)}</b>`:v}</td>`).join("")}</tr>`).join("")}</tbody>
+    </table></div></div>`;
+}
+
 /* ============================================================
    TELA: VISÃO GERAL
    ============================================================ */
@@ -1463,7 +1488,6 @@ function renderOverview(){
   const hasSat = hasSheetData('satisfaction');
   const hasMon = hasSheetData('monitoring');
   const hasCanal = hasReceived || hasMade || hasChat;
-
   const volumeTotal = received.length + made.length + chatRows.length;
 
   const kpis = [
@@ -1476,290 +1500,153 @@ function renderOverview(){
     hasReceived ? kpiCard("TME", fmtSec(rm.tme), "tempo médio de espera (receptivo)") : "",
   ].filter(Boolean);
 
-  const trendCards = [
-    hasCanal ? `<div class="card"><div class="card-title">Mix de canais por mês <small>quantidade de atendimentos</small></div>
-      <div class="chart-wrap"><canvas id="chOverviewMix"></canvas></div></div>` : "",
-    hasCanal ? `<div class="card"><div class="card-title">Volume por dia da semana</div>
-      <div class="chart-wrap"><canvas id="chOverviewWeekday"></canvas></div></div>` : "",
-    hasCanal ? `<div class="card"><div class="card-title">Atendimentos por setor em cada mês</div>
-      <div class="chart-wrap tall"><canvas id="chOverviewSetorMonth"></canvas></div></div>` : "",
-  ].filter(Boolean);
+  const monthMap = new Map();
+  const weekday = [0,0,0,0,0,0,0];
+  const setorMap = new Map();
+  const setorMonthMap = new Map();
 
-  const setorCards = [
-    hasCanal ? `<div class="card"><div class="card-title">Volume por setor</div>
-      <div class="chart-wrap"><canvas id="chOverviewSetor"></canvas></div></div>` : "",
-    hasSat ? `<div class="card"><div class="card-title">Notas de satisfação por setor</div>
-      <div class="chart-wrap"><canvas id="chOverviewSatSetor"></canvas></div></div>` : "",
-  ].filter(Boolean);
+  function tally(rows, canalKey){
+    for(const r of rows){
+      const d = r._date;
+      if(!d) continue;
+      const mk = monthKeyISO(d);
+      if(!monthMap.has(mk)) monthMap.set(mk, {Receptivo:0,Ativo:0,Chat:0,_date:d});
+      monthMap.get(mk)[canalKey]++;
+      weekday[d.getDay()]++;
+      const s = r.setor || "—";
+      setorMap.set(s, (setorMap.get(s)||0)+1);
+      if(!setorMonthMap.has(mk)) setorMonthMap.set(mk, new Map());
+      const sm = setorMonthMap.get(mk);
+      sm.set(s, (sm.get(s)||0)+1);
+    }
+  }
+  tally(received,"Receptivo"); tally(made,"Ativo"); tally(chatRows,"Chat");
 
-  const canalCards = [
-    hasCanal ? `<div class="card"><div class="card-title">Volume por canal <small>ligações ativas, receptivas e chat</small></div>
-      <div class="chart-wrap"><canvas id="chOverviewCanal"></canvas></div></div>` : "",
-    hasSat ? `<div class="card"><div class="card-title">Distribuição das notas de satisfação</div>
-      <div class="chart-wrap"><canvas id="chOverviewSat"></canvas></div></div>` : "",
-  ].filter(Boolean);
+  const months = Array.from(monthMap.keys()).sort();
+  const monthLabels = months.map(m=>monthLabelShort(monthMap.get(m)._date));
+  const setorLabels = Array.from(setorMap.keys()).sort((a,b)=>setorMap.get(b)-setorMap.get(a));
+
+  const cards = [];
+
+  if(hasCanal && months.length){
+    const rows = months.map((m,i)=>{
+      const x=monthMap.get(m);
+      return [monthLabels[i], fmtNum(x.Receptivo), fmtNum(x.Ativo), fmtNum(x.Chat), `<b>${fmtNum(x.Receptivo+x.Ativo+x.Chat)}</b>`];
+    }).reverse();
+    cards.push(simpleTableCard("Mix de canais por mês",["Mês","Receptivo","Ativo","Chat","Total"],rows));
+  }
+
+  if(hasCanal && weekday.some(v=>v>0)){
+    const labels=['Domingo','Segunda-feira','Terça-feira','Quarta-feira','Quinta-feira','Sexta-feira','Sábado'];
+    const rows=labels.map((d,i)=>[d,weekday[i]]).filter(r=>r[1]>0).sort((a,b)=>b[1]-a[1]).map(r=>[r[0],fmtNum(r[1])]);
+    cards.push(rankingTableCard("Ranking de volume por dia da semana",["Dia","Atendimentos"],rows,{boldFirst:true}));
+  }
+
+  if(hasCanal && setorLabels.length && months.length){
+    const rows=setorLabels.map(s=>{
+      const vals=months.map(m=>(setorMonthMap.get(m)||new Map()).get(s)||0);
+      const total=vals.reduce((a,b)=>a+b,0);
+      return [s,...vals.map(fmtNum),`<b>${fmtNum(total)}</b>`,total];
+    }).sort((a,b)=>b[b.length-1]-a[a.length-1]).map(r=>r.slice(0,-1));
+    cards.push(rankingTableCard("Ranking de atendimentos por setor e mês",["Setor",...monthLabels,"Total"],rows,{boldFirst:true}));
+  }
+
+  if(hasCanal && setorLabels.length){
+    const rows=setorLabels.map(s=>[s,fmtNum(setorMap.get(s))]);
+    cards.push(rankingTableCard("Ranking de volume por setor",["Setor","Atendimentos"],rows,{boldFirst:true}));
+  }
+
+  if(hasSat){
+    const bySatSetor=groupBy(getSatFiltered(),r=>r.setor||"—");
+    const rows=Array.from(bySatSetor.entries()).map(([s,rs])=>{
+      const c=computeCsat(rs);
+      return [s,c.csat, c.total];
+    }).filter(r=>isFinite(r[1]) && r[2]>0).sort((a,b)=>b[1]-a[1])
+      .map(r=>[r[0],fmtPct(r[1]),fmtNum(r[2])]);
+    cards.push(rankingTableCard("Ranking de satisfação por setor",["Setor","CSAT","Avaliações"],rows,{boldFirst:true}));
+  }
+
+  if(hasCanal){
+    const channelRows=[["Receptivo",received.length],["Ativo",made.length],["Chat",chatRows.length]]
+      .filter(r=>r[1]>0).sort((a,b)=>b[1]-a[1]).map(r=>[r[0],fmtNum(r[1])]);
+    cards.push(rankingTableCard("Ranking de volume por canal",["Canal","Atendimentos"],channelRows,{boldFirst:true}));
+  }
+
+  if(hasSat && sat.dist.some(v=>v>0)){
+    const noteRows=sat.dist.map((v,i)=>({nota:i+1,count:v})).filter(r=>r.count>0).sort((a,b)=>b.count-a.count)
+      .map(r=>[String(r.nota),fmtNum(r.count)]);
+    cards.push(rankingTableCard("Ranking da distribuição das notas de satisfação",["Nota","Avaliações"],noteRows,{boldFirst:true}));
+  }
 
   return `
   ${usingPublishedSnapshot ? `<div class="note-box" style="margin-bottom:18px;">📦 Dados publicados em ${publishedSnapshotAt ? new Date(publishedSnapshotAt).toLocaleString('pt-BR') : "data desconhecida"}.</div>` : ""}
   <div class="section-title"><span class="chev">›</span> Indicadores gerais</div>
   <div class="kpi-grid">${kpis.join("")}</div>
-
-  ${trendCards.length ? `<div class="section-title"><span class="chev">›</span> Tendências</div><div class="grid-auto">${trendCards.join("")}</div>` : ""}
-  ${setorCards.length ? `<div class="section-title"><span class="chev">›</span> Setores</div><div class="grid-auto">${setorCards.join("")}</div>` : ""}
-  ${canalCards.length ? `<div class="section-title"><span class="chev">›</span> Canais e satisfação</div><div class="grid-auto">${canalCards.join("")}</div>` : ""}
+  ${cards.length ? `<div class="section-title"><span class="chev">›</span> Rankings e comparativos</div><div class="grid-auto">${cards.join("")}</div>` : ""}
   `;
 }
-function afterRenderOverview(){
-  try{
-    const received = getReceivedFiltered();
-    const made = getMadeFiltered();
-    const chatRows = getChatFiltered();
-    const sat = computeCsat(getSatFiltered());
-    const sats = getSatFiltered();
-
-    // Agregação em um único passe por fonte (evita criar arrays gigantes de objetos novos)
-    const monthMap = new Map();        // "2026-01" -> {Receptivo,Ativo,Chat,_date}
-    const weekday = [0,0,0,0,0,0,0];
-    const setorMap = new Map();        // setor -> total (todos os canais)
-    const setorMonthMap = new Map();   // "2026-01" -> Map(setor -> total)
-
-    function tally(rows, canalKey){
-      for(let i=0;i<rows.length;i++){
-        const r = rows[i];
-        const d = r._date;
-        if(!d) continue;
-        const mk = monthKeyISO(d);
-        if(!monthMap.has(mk)) monthMap.set(mk, {Receptivo:0, Ativo:0, Chat:0, _date:d});
-        monthMap.get(mk)[canalKey]++;
-        weekday[d.getDay()]++;
-        const s = r.setor || "—";
-        setorMap.set(s, (setorMap.get(s)||0)+1);
-        if(!setorMonthMap.has(mk)) setorMonthMap.set(mk, new Map());
-        const sm = setorMonthMap.get(mk);
-        sm.set(s, (sm.get(s)||0)+1);
-      }
-    }
-    tally(received, "Receptivo");
-    tally(made, "Ativo");
-    tally(chatRows, "Chat");
-
-    const months = Array.from(monthMap.keys()).sort();
-    const monthLabels = months.map(m=>monthLabelShort(monthMap.get(m)._date));
-    const setorLabels = Array.from(setorMap.keys()).sort((a,b)=>setorMap.get(b)-setorMap.get(a));
-
-    // CSAT por setor
-    const bySatSetor = groupBy(sats, r=>r.setor||"—");
-    const satSetorLabels = Array.from(bySatSetor.keys()).sort();
-    const satSetorValues = satSetorLabels.map(s=>{ const c = computeCsat(bySatSetor.get(s)||[]).csat; return isFinite(c)?+(c*100).toFixed(1):0; });
-
-    // Volume por canal (totais)
-    const canalLabels = ['Receptivo','Ativo','Chat'];
-    const canalValues = [received.length, made.length, chatRows.length];
-    const canalColors = ['#7063F0','#FF7029','#1C1F26'];
-
-    // IMPORTANTE: a criação dos gráficos é adiada para o próximo frame (requestAnimationFrame).
-    // Criar um Chart.js no mesmíssimo instante em que o HTML acabou de ser inserido pode dar um
-    // canvas com largura/altura ainda zeradas (o navegador não terminou o layout) — o gráfico é
-    // "desenhado" mas fica invisível, sem gerar nenhum erro. Adiar um frame resolve isso.
-    requestAnimationFrame(()=>{
-      if(currentScreen!=="overview") return; // usuário já trocou de tela nesse meio tempo
-
-      if(document.getElementById('chOverviewMix')){
-        try{
-          charts.overviewMix = new Chart(document.getElementById('chOverviewMix'), {
-            type:'bar',
-            data:{labels: monthLabels, datasets:[
-              {label:'Receptivo', data: months.map(m=>monthMap.get(m).Receptivo), backgroundColor:'#7063F0', borderRadius:5},
-              {label:'Ativo', data: months.map(m=>monthMap.get(m).Ativo), backgroundColor:'#FF7029', borderRadius:5},
-              {label:'Chat', data: months.map(m=>monthMap.get(m).Chat), backgroundColor:'#1C1F26', borderRadius:5},
-            ]},
-            options: {...baseChartOpts(), plugins:{legend:{display:true, position:'bottom', labels:{boxWidth:10,font:{size:11}}}}}
-          });
-        }catch(e){ console.error("chOverviewMix", e); showChartError('chOverviewMix', e); }
-      }
-
-      if(document.getElementById('chOverviewWeekday')){
-        try{
-          const wLabels = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
-          charts.overviewWeekday = new Chart(document.getElementById('chOverviewWeekday'), {
-            type:'bar',
-            data:{labels:wLabels, datasets:[{label:'Atendimentos', data:weekday, backgroundColor:'#7063F0', borderRadius:6}]},
-            options: baseChartOpts()
-          });
-        }catch(e){ console.error("chOverviewWeekday", e); showChartError('chOverviewWeekday', e); }
-      }
-
-      if(document.getElementById('chOverviewSetorMonth')){
-        try{
-          const datasets = setorLabels.map((s,i)=>({
-            label: s,
-            data: months.map(m=> (setorMonthMap.get(m)||new Map()).get(s) || 0),
-            backgroundColor: colorForIndex(i),
-            stack: 'setores',
-            borderRadius:4,
-          }));
-          charts.overviewSetorMonth = new Chart(document.getElementById('chOverviewSetorMonth'), {
-            type:'bar',
-            data:{labels: monthLabels, datasets},
-            options: {...baseChartOpts(),
-              plugins:{legend:{display:true, position:'bottom', labels:{boxWidth:10,font:{size:10}}}},
-              scales:{ x:{...baseChartOpts().scales.x, stacked:true}, y:{...baseChartOpts().scales.y, stacked:true} }}
-          });
-        }catch(e){ console.error("chOverviewSetorMonth", e); showChartError('chOverviewSetorMonth', e); }
-      }
-
-      if(document.getElementById('chOverviewSetor')){
-        try{
-          charts.overviewSetor = new Chart(document.getElementById('chOverviewSetor'), {
-            type:'bar',
-            data:{labels:setorLabels, datasets:[{data:setorLabels.map(s=>setorMap.get(s)), backgroundColor:setorLabels.map((_,i)=>colorForIndex(i)), borderRadius:6}]},
-            options: {...baseChartOpts(), indexAxis:'y'}
-          });
-        }catch(e){ console.error("chOverviewSetor", e); showChartError('chOverviewSetor', e); }
-      }
-
-      if(document.getElementById('chOverviewSatSetor')){
-        try{
-          charts.overviewSatSetor = new Chart(document.getElementById('chOverviewSatSetor'), {
-            type:'bar',
-            data:{labels:satSetorLabels, datasets:[{data:satSetorValues, backgroundColor:satSetorLabels.map((_,i)=>colorForIndex(i)), borderRadius:6}]},
-            options: {...baseChartOpts(), scales:{...baseChartOpts().scales, y:{...baseChartOpts().scales.y, max:100}}}
-          });
-        }catch(e){ console.error("chOverviewSatSetor", e); showChartError('chOverviewSatSetor', e); }
-      }
-
-      if(document.getElementById('chOverviewCanal')){
-        try{
-          charts.overviewCanal = new Chart(document.getElementById('chOverviewCanal'), {
-            type:'doughnut',
-            data:{labels:canalLabels, datasets:[{data:canalValues, backgroundColor:canalColors}]},
-            options: {responsive:true, maintainAspectRatio:false, plugins:{legend:{display:true, position:'bottom', labels:{boxWidth:10,font:{size:11}}}}}
-          });
-        }catch(e){ console.error("chOverviewCanal", e); showChartError('chOverviewCanal', e); }
-      }
-
-      if(document.getElementById('chOverviewSat')){
-        try{
-          charts.overviewSat = new Chart(document.getElementById('chOverviewSat'), {
-            type:'bar',
-            data:{labels:['1','2','3','4','5'], datasets:[{label:'Avaliações', data:sat.dist, backgroundColor:['#EF4444','#F59E0B','#FBBF24','#84CC16','#22C55E'], borderRadius:6}]},
-            options: baseChartOpts()
-          });
-        }catch(e){ console.error("chOverviewSat", e); showChartError('chOverviewSat', e); }
-      }
-    });
-  }catch(e){ console.error("afterRenderOverview", e); }
-}
+function afterRenderOverview(){}
 /* ============================================================
    TELA: POR SETOR
    ============================================================ */
 function renderSector(){
   const setores = state.filters.setor==="all" ? allSetores() : [state.filters.setor];
-  const received = getReceivedFiltered();
-  const made = getMadeFiltered();
-  const chatRows = getChatFiltered();
-  const sats = getSatFiltered();
-  const mons = getMonFiltered();
-  const pauses = getPauseFiltered();
+  const received=getReceivedFiltered(), made=getMadeFiltered(), chatRows=getChatFiltered();
+  const sats=getSatFiltered(), mons=getMonFiltered(), pauses=getPauseFiltered();
+  const hasReceived=hasSheetData('received'), hasMade=hasSheetData('made'), hasChat=hasSheetData('chat');
+  const hasSat=hasSheetData('satisfaction'), hasMon=hasSheetData('monitoring'), hasPause=hasSheetData('pause');
+  const hasCanal=hasReceived||hasMade||hasChat;
 
-  const hasReceived = hasSheetData('received');
-  const hasMade = hasSheetData('made');
-  const hasChat = hasSheetData('chat');
-  const hasSat = hasSheetData('satisfaction');
-  const hasMon = hasSheetData('monitoring');
-  const hasPause = hasSheetData('pause');
-  const hasCanal = hasReceived || hasMade || hasChat;
+  const byRecSetor=groupBy(received,r=>r.setor||"—");
+  const byMadeSetor=groupBy(made,r=>r.setor||"—");
+  const byChatSetor=groupBy(chatRows,r=>r.setor||"—");
+  const bySatSetor=groupBy(sats,r=>r.setor||"—");
+  const byMonSetor=groupBy(mons,r=>r.setor||"—");
+  const byPauseSetor=groupBy(pauses,r=>r.setor||"—");
 
-  const byRecSetor = groupBy(received, r=>r.setor||"—");
-  const byMadeSetor = groupBy(made, r=>r.setor||"—");
-  const byChatSetor = groupBy(chatRows, r=>r.setor||"—");
-  const bySatSetor = groupBy(sats, r=>r.setor||"—");
-  const byMonSetor = groupBy(mons, r=>r.setor||"—");
-  const byPauseSetor = groupBy(pauses, r=>r.setor||"—");
-
-  const rows = setores.map(s=>{
-    const rm = computeReceivedMetrics(byRecSetor.get(s)||[]);
-    const mm = computeMadeMetrics(byMadeSetor.get(s)||[]);
-    const chatCount = (byChatSetor.get(s)||[]).length;
-    const sat = computeCsat(bySatSetor.get(s)||[]);
-    const mon = computeMonitoria(byMonSetor.get(s)||[]);
-    const pauseList = byPauseSetor.get(s)||[];
-    const pauseTotal = sum(pauseList.map(r=>r._sec));
-    const volume = (byRecSetor.get(s)||[]).length + (byMadeSetor.get(s)||[]).length + chatCount;
-    return {setor:s, volume, ...rm, tmaComb: avg([rm.tma, mm.tma].filter(isFinite)), csat:sat.csat, notaMon:mon.media, pauseTotal};
+  const rows=setores.map(s=>{
+    const rm=computeReceivedMetrics(byRecSetor.get(s)||[]);
+    const mm=computeMadeMetrics(byMadeSetor.get(s)||[]);
+    const chatCount=(byChatSetor.get(s)||[]).length;
+    const sat=computeCsat(bySatSetor.get(s)||[]);
+    const mon=computeMonitoria(byMonSetor.get(s)||[]);
+    const pauseTotal=sum((byPauseSetor.get(s)||[]).map(r=>r._sec));
+    const volume=(byRecSetor.get(s)||[]).length+(byMadeSetor.get(s)||[]).length+chatCount;
+    return {setor:s,volume,...rm,tmaComb:avg([rm.tma,mm.tma].filter(isFinite)),csat:sat.csat,notaMon:mon.media,pauseTotal};
   }).sort((a,b)=>b.volume-a.volume);
 
-  const columns = [
-    {always:true, label:"Setor", render:r=>`<b>${esc(r.setor)}</b>`},
-    {always:true, label:"Volume", render:r=>fmtNum(r.volume)},
-    {show:hasReceived, label:"% Abandono", render:r=>fmtPct(r.pctAbandono)},
-    {show:hasReceived, label:"Nível de Serviço", render:r=>fmtPct(r.nivelServico/100)},
-    {show:hasReceived||hasMade, label:"TMA", render:r=>fmtSec(r.tmaComb)},
-    {show:hasReceived, label:"TME", render:r=>fmtSec(r.tme)},
-    {show:hasSat, label:"CSAT", render:r=>fmtPct(r.csat)},
-    {show:hasMon, label:"Nota Monitoria", render:r=>fmtPct(r.notaMon)},
-    {show:hasPause, label:"Tempo em Pausa", render:r=>fmtSec(r.pauseTotal)},
+  const columns=[
+    {always:true,label:"Setor",render:r=>`<b>${esc(r.setor)}</b>`},
+    {always:true,label:"Volume",render:r=>fmtNum(r.volume)},
+    {show:hasReceived,label:"% Abandono",render:r=>fmtPct(r.pctAbandono)},
+    {show:hasReceived,label:"Nível de Serviço",render:r=>fmtPct(r.nivelServico/100)},
+    {show:hasReceived||hasMade,label:"TMA",render:r=>fmtSec(r.tmaComb)},
+    {show:hasReceived,label:"TME",render:r=>fmtSec(r.tme)},
+    {show:hasSat,label:"CSAT",render:r=>fmtPct(r.csat)},
+    {show:hasMon,label:"Nota Monitoria",render:r=>fmtPct(r.notaMon)},
+    {show:hasPause,label:"Tempo em Pausa",render:r=>fmtSec(r.pauseTotal)},
   ].filter(c=>c.always||c.show);
 
-  const chartCards = [
-    hasCanal ? `<div class="card"><div class="card-title">Volume de atendimentos por setor</div>
-      <div class="chart-wrap"><canvas id="chSectorVolume"></canvas></div></div>` : "",
-    hasSat ? `<div class="card"><div class="card-title">CSAT por setor</div>
-      <div class="chart-wrap"><canvas id="chSectorCsat"></canvas></div></div>` : "",
-  ].filter(Boolean);
+  const cards=[];
+  if(hasCanal){
+    const volumeRows=rows.filter(r=>r.volume>0).map(r=>[r.setor,fmtNum(r.volume)]);
+    cards.push(rankingTableCard("Ranking de volume de atendimentos por setor",["Setor","Atendimentos"],volumeRows,{boldFirst:true}));
+  }
+  if(hasSat){
+    const csatRows=rows.filter(r=>isFinite(r.csat) && (bySatSetor.get(r.setor)||[]).length>0)
+      .sort((a,b)=>b.csat-a.csat).map(r=>[r.setor,fmtPct(r.csat),fmtNum((bySatSetor.get(r.setor)||[]).length)]);
+    cards.push(rankingTableCard("Ranking de CSAT por setor",["Setor","CSAT","Avaliações"],csatRows,{boldFirst:true}));
+  }
 
   return `
-  ${chartCards.length ? `<div class="section-title"><span class="chev">›</span> Comparativo entre setores</div><div class="grid-auto">${chartCards.join("")}</div>` : ""}
-
+  ${cards.length ? `<div class="section-title"><span class="chev">›</span> Rankings por setor</div><div class="grid-auto">${cards.join("")}</div>` : ""}
   <div class="section-title"><span class="chev">›</span> Detalhamento por setor</div>
-  <div class="card">
-    <div class="table-wrap"><table class="data-table" id="tblSector">
-      <thead><tr>${columns.map(c=>`<th>${c.label}</th>`).join("")}</tr></thead>
-      <tbody>
-        ${rows.map(r=>`<tr>${columns.map(c=>`<td>${c.render(r)}</td>`).join("")}</tr>`).join("")}
-      </tbody>
-    </table></div>
-  </div>
-  `;
+  <div class="card"><div class="table-wrap"><table class="data-table" id="tblSector">
+    <thead><tr>${columns.map(c=>`<th>${c.label}</th>`).join("")}</tr></thead>
+    <tbody>${rows.filter(r=>r.volume>0 || setores.length===1).map(r=>`<tr>${columns.map(c=>`<td>${c.render(r)}</td>`).join("")}</tr>`).join("")}</tbody>
+  </table></div></div>`;
 }
-function afterRenderSector(){
-  try{
-    const setores = state.filters.setor==="all" ? allSetores() : [state.filters.setor];
-    const received = getReceivedFiltered();
-    const made = getMadeFiltered();
-    const chatRows = getChatFiltered();
-    const sats = getSatFiltered();
-    const byRecSetor = groupBy(received, r=>r.setor||"—");
-    const byMadeSetor = groupBy(made, r=>r.setor||"—");
-    const byChatSetor = groupBy(chatRows, r=>r.setor||"—");
-    const bySatSetor = groupBy(sats, r=>r.setor||"—");
-
-    const vol = setores.map(s=>(byRecSetor.get(s)||[]).length + (byMadeSetor.get(s)||[]).length + (byChatSetor.get(s)||[]).length);
-    const csat = setores.map(s=>{ const c = computeCsat(bySatSetor.get(s)||[]).csat; return isFinite(c)?c*100:0; });
-
-    requestAnimationFrame(()=>{
-      if(currentScreen!=="sector") return;
-      if(document.getElementById('chSectorVolume')){
-        try{
-          charts.sectorVolume = new Chart(document.getElementById('chSectorVolume'), {
-            type:'bar', data:{labels:setores, datasets:[{data:vol, backgroundColor:setores.map((_,i)=>colorForIndex(i)), borderRadius:6}]},
-            options: baseChartOpts()
-          });
-        }catch(e){ console.error("chSectorVolume", e); showChartError('chSectorVolume', e); }
-      }
-
-      if(document.getElementById('chSectorCsat')){
-        try{
-          charts.sectorCsat = new Chart(document.getElementById('chSectorCsat'), {
-            type:'bar', data:{labels:setores, datasets:[{data:csat, backgroundColor:setores.map((_,i)=>colorForIndex(i)), borderRadius:6}]},
-            options: {...baseChartOpts(), scales:{...baseChartOpts().scales, y:{...baseChartOpts().scales.y, max:100}}}
-          });
-        }catch(e){ console.error("chSectorCsat", e); showChartError('chSectorCsat', e); }
-      }
-    });
-  }catch(e){ console.error("afterRenderSector", e); }
-}
-
+function afterRenderSector(){}
 /* ============================================================
    TELA: RANKING GAMIFICADO
    ============================================================ */
@@ -2277,13 +2164,6 @@ function updateSidebarStatus(){
   else { dot.className='status-dot'; text.textContent='Todas as fontes conectadas'; }
 }
 
-/* Hook post-render chart builders */
-const _origRenderScreen = renderScreen;
-renderScreen = function(){
-  _origRenderScreen();
-  if(currentScreen==="overview" && hasAnyData()) afterRenderOverview();
-  if(currentScreen==="sector" && hasAnyData()) afterRenderSector();
-};
 
 /* ============================================================
    BOOTSTRAP
