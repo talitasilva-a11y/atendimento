@@ -139,6 +139,7 @@ input,select{font-family:inherit;}
 
 .grid-2{display:grid;grid-template-columns:1.3fr 1fr;gap:16px;}
 .grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;}
+.grid-auto{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px;}
 @media(max-width:1000px){.grid-2,.grid-3{grid-template-columns:1fr;}}
 
 .card{
@@ -238,6 +239,8 @@ table.data-table tbody tr:hover{background:#FAFAFD;}
 .loading-overlay{position:fixed;inset:0;background:rgba(28,31,38,0.4);display:none;align-items:center;justify-content:center;z-index:100;}
 .loading-box{background:#fff;padding:24px 34px;border-radius:14px;font-weight:600;font-size:13px;display:flex;align-items:center;gap:12px;}
 .spinner{width:18px;height:18px;border:3px solid var(--purple-light);border-top-color:var(--purple);border-radius:50%;animation:spin 0.7s linear infinite;}
+.sync-indicator{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;color:var(--text-muted);font-weight:500;margin-left:4px;}
+.spinner-sm{width:11px;height:11px;border:2px solid var(--purple-light);border-top-color:var(--purple);border-radius:50%;animation:spin 0.7s linear infinite;flex:none;}
 @keyframes spin{to{transform:rotate(360deg);}}
 
 .legend-row{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:11.5px;color:var(--text-muted);}
@@ -271,6 +274,7 @@ table.data-table tbody tr:hover{background:#FAFAFD;}
         <button class="menu-toggle" id="menuToggle"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
         <span class="chevron">›</span>
         <h1 id="screenTitle">Visão Geral</h1>
+        <span id="syncIndicator" class="sync-indicator" style="display:none;"><span class="spinner-sm"></span>Atualizando dados...</span>
       </div>
       <div class="filters" id="globalFilters"></div>
     </div>
@@ -407,7 +411,38 @@ const SHEETS = {
   }
 };
 
-// Palpites automáticos de mapeamento por nome de cabeçalho (evita trabalho manual quando os nomes batem)
+/* ============================================================
+   LINKS E MAPEAMENTO PADRÃO DO SITE (para dados AO VIVO, para qualquer pessoa)
+   ------------------------------------------------------------
+   Preencha aqui os links CSV publicados de cada aba da sua planilha (e o
+   mapeamento de colunas, se quiser garantir). Depois de preencher e salvar
+   este arquivo no GitHub, TODA VEZ que alguém abrir o link do site — em
+   qualquer navegador, incluindo quem nunca configurou nada — o painel busca
+   os dados direto da planilha, ao vivo. Sempre que a planilha for atualizada,
+   basta abrir (ou atualizar/F5) o site para ver os dados mais recentes.
+
+   Você não precisa editar isto manualmente: carregue os dados normalmente na
+   tela de Configuração e clique em "Gerar código para publicar dados ao vivo"
+   — isso monta este bloco pronto para você colar aqui.
+   ============================================================ */
+const DEFAULT_URLS = {
+  received: "",
+  made: "",
+  chat: "",
+  chatPerf: "",
+  satisfaction: "",
+  monitoring: "",
+  pause: ""
+};
+const DEFAULT_MAPPING = {
+  received: {},
+  made: {},
+  chat: {},
+  chatPerf: {},
+  satisfaction: {},
+  monitoring: {},
+  pause: {}
+};
 const HEADER_GUESSES = {
   data:["data","data início","data inicio"], agente:["atendente","agente"],
   contato:["contato"], setor:["setor"], status:["status da chamada","status"],
@@ -471,6 +506,233 @@ async function loadConfig(){
       state.mapping = parsed.mapping || {};
     }
   }catch(e){ /* sem config ainda */ }
+  // Preenche com os links/mapeamento padrão embutidos no código (DEFAULT_URLS/DEFAULT_MAPPING)
+  // para tudo que este navegador ainda não tiver — é o que permite que qualquer pessoa,
+  // mesmo sem nunca ter configurado nada, já busque os dados ao vivo da planilha.
+  Object.keys(SHEETS).forEach(key=>{
+    if(!state.urls[key] && DEFAULT_URLS[key]) state.urls[key] = DEFAULT_URLS[key];
+    if((!state.mapping[key] || Object.keys(state.mapping[key]).length===0) && DEFAULT_MAPPING[key] && Object.keys(DEFAULT_MAPPING[key]).length>0){
+      state.mapping[key] = DEFAULT_MAPPING[key];
+    }
+  });
+}
+
+/* ---------- PERSISTÊNCIA DOS DADOS JÁ CARREGADOS ----------
+   Além dos links e do mapeamento, agora também guardamos os dados já
+   buscados de cada aba (state.raw/state.headers) no navegador, para que
+   ao apertar F5 (ou reabrir o site no GitHub Pages) os números continuem
+   aparecendo sem precisar clicar em "Carregar" de novo.
+
+   Isso usa o mesmo localStorage (ou window.storage dentro do Claude), que
+   tem um limite total de alguns MB por site. Por isso, cada aba só é salva
+   se o tamanho dela (em JSON) estiver dentro de RAW_STORAGE_MAX_BYTES —
+   abas muito grandes (ex.: Chamadas Realizadas com 190k+ linhas) podem não
+   caber e, nesse caso, seguem precisando ser recarregadas manualmente após
+   o F5. O painel avisa quando isso acontece. */
+const RAW_STORAGE_PREFIX = 'agility_raw_';
+const RAW_STORAGE_MAX_BYTES = 3.5 * 1024 * 1024; // ~3.5MB por aba, deixando margem no limite total do navegador
+let rawPersistFailed = {}; // key -> true quando a aba era grande/não coube no storage
+
+async function saveRawData(key){
+  try{
+    const rows = state.raw[key] || [];
+    if(rows.length===0) return true;
+    const payload = JSON.stringify({headers: state.headers[key]||[], rows});
+    if(payload.length > RAW_STORAGE_MAX_BYTES){
+      rawPersistFailed[key] = true;
+      return false;
+    }
+    const ok = await storageSetRaw(RAW_STORAGE_PREFIX+key, payload);
+    rawPersistFailed[key] = !ok;
+    return ok;
+  }catch(e){
+    rawPersistFailed[key] = true;
+    return false;
+  }
+}
+async function loadRawData(key){
+  try{
+    const value = await storageGetRaw(RAW_STORAGE_PREFIX+key);
+    if(!value) return false;
+    const parsed = JSON.parse(value);
+    state.headers[key] = parsed.headers || [];
+    state.raw[key] = parsed.rows || [];
+    return true;
+  }catch(e){ return false; }
+}
+async function saveAllRawData(){
+  for(const key of Object.keys(SHEETS)) await saveRawData(key);
+}
+async function loadAllRawData(){
+  for(const key of Object.keys(SHEETS)) await loadRawData(key);
+}
+
+/* ---------- DADOS PUBLICADOS (snapshot estático para qualquer navegador) ----------
+   localStorage só existe no navegador de quem carregou os dados. Para quem só
+   vai VISUALIZAR o painel (ex.: enviar o link para o diretor), isso não é
+   suficiente — em outro navegador/computador o painel apareceria vazio.
+
+   A solução: depois de carregar os dados, o dono do painel clica em "Gerar
+   arquivo de dados para publicar", baixa o arquivo agility-data.json, e sobe
+   esse arquivo na MESMA pasta do index.html no repositório do GitHub (mesmo
+   nome de arquivo). A partir daí, toda vez que o site é aberto — em qualquer
+   navegador — ele busca esse arquivo (é um arquivo estático do próprio site,
+   sem CORS e sem depender de armazenamento do navegador) e já mostra os
+   dados prontos, sem precisar clicar em nada.
+
+   Isso é uma FOTO dos dados no momento em que o arquivo foi gerado — para
+   atualizar, quem administra o painel carrega os dados novos e gera/publica
+   um novo agility-data.json. */
+const PUBLISHED_SNAPSHOT_FILENAME = 'agility-data.json';
+let usingPublishedSnapshot = false;
+let publishedSnapshotAt = null;
+
+function exportPublishedSnapshot(){
+  const data = {};
+  let anyData = false;
+  Object.keys(SHEETS).forEach(key=>{
+    if(state.raw[key] && state.raw[key].length>0){
+      data[key] = { headers: state.headers[key]||[], rows: state.raw[key] };
+      anyData = true;
+    }
+  });
+  if(!anyData){
+    alert('Carregue ao menos uma fonte de dados antes de gerar o arquivo para publicar.');
+    return;
+  }
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    urls: state.urls,
+    mapping: state.mapping,
+    data
+  };
+  const blob = new Blob([JSON.stringify(payload)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = PUBLISHED_SNAPSHOT_FILENAME;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+async function loadPublishedSnapshotIfNeeded(){
+  const anyMissing = Object.keys(SHEETS).some(k=>!(state.raw[k] && state.raw[k].length>0));
+  if(!anyMissing) return; // já tem tudo (ex.: veio do localStorage de quem administra) — não precisa do snapshot
+  try{
+    const res = await fetch('./'+PUBLISHED_SNAPSHOT_FILENAME, {cache:'no-store'});
+    if(!res.ok) return; // arquivo ainda não foi publicado — segue normalmente para a tela de Configuração
+    const snap = await res.json();
+    let usedAny = false;
+    Object.keys(SHEETS).forEach(key=>{
+      const already = state.raw[key] && state.raw[key].length>0;
+      const fromSnap = snap.data && snap.data[key];
+      if(!already && fromSnap){
+        state.raw[key] = fromSnap.rows || [];
+        state.headers[key] = fromSnap.headers || [];
+        if(!state.urls[key] && snap.urls && snap.urls[key]) state.urls[key] = snap.urls[key];
+        if((!state.mapping[key] || Object.keys(state.mapping[key]).length===0) && snap.mapping && snap.mapping[key]){
+          state.mapping[key] = snap.mapping[key];
+        }
+        usedAny = true;
+      }
+    });
+    if(usedAny){
+      usingPublishedSnapshot = true;
+      publishedSnapshotAt = snap.generatedAt || null;
+    }
+  }catch(e){ /* sem arquivo publicado, ou fetch bloqueado — segue sem ele */ }
+}
+
+/* ---------- AUTO-ATUALIZAÇÃO AO VIVO ----------
+   Sempre que a página é aberta (ou recarregada com F5), o painel tenta buscar
+   a versão mais recente de cada aba direto da planilha (usando os links salvos
+   neste navegador OU os links padrão embutidos no código — DEFAULT_URLS).
+
+   - Se já existem dados em cache neste navegador: eles aparecem IMEDIATAMENTE
+     (tela nunca fica vazia), e a busca ao vivo roda por baixo dos panos —
+     só quando terminar com sucesso é que os números são atualizados na tela.
+   - Se uma aba falhar ao buscar (sem internet, link quebrado, CORS), os dados
+     que já estavam em cache continuam sendo exibidos normalmente — nada some.
+   - Se este navegador nunca carregou nada antes (ex.: primeira vez que o
+     diretor abre o link), aí sim mostramos a tela de carregamento (com botão
+     Cancelar) enquanto busca pela primeira vez. */
+function showSyncIndicator(){
+  const el = document.getElementById('syncIndicator');
+  if(el) el.style.display = 'inline-flex';
+}
+function hideSyncIndicator(){
+  const el = document.getElementById('syncIndicator');
+  if(el) el.style.display = 'none';
+}
+async function backgroundAutoRefresh(){
+  loadGeneration++;
+  const myGen = loadGeneration;
+  const keys = Object.keys(SHEETS).filter(k=>(state.urls[k]||'').trim());
+  if(keys.length===0) return;
+  showSyncIndicator();
+  for(const key of keys){
+    if(myGen!==loadGeneration){ hideSyncIndicator(); return; }
+    const res = await fetchSheet(key, ()=>{});
+    if(myGen!==loadGeneration){ hideSyncIndicator(); return; }
+    if(res.ok){
+      normalizeSheetIfMapped(key);
+      await saveRawData(key);
+      renderScreen();
+      updateSidebarStatus();
+    }
+    // se falhar (offline, CORS, timeout), mantemos o que já estava em cache — nada é apagado
+  }
+  saveConfig();
+  hideSyncIndicator();
+}
+async function foregroundAutoRefresh(){
+  loadGeneration++;
+  const myGen = loadGeneration;
+  const keys = Object.keys(SHEETS).filter(k=>(state.urls[k]||'').trim());
+  if(keys.length===0) return false;
+  let gotAny = false;
+  for(const key of keys){
+    if(myGen!==loadGeneration) return gotAny;
+    showLoading(`Carregando ${SHEETS[key].label}...`);
+    const res = await fetchSheet(key, count=>{
+      if(myGen!==loadGeneration) return;
+      showLoading(`Carregando ${SHEETS[key].label}... ${count.toLocaleString('pt-BR')} linhas`);
+    });
+    if(myGen!==loadGeneration) return gotAny;
+    if(res.ok){ normalizeSheetIfMapped(key); await saveRawData(key); gotAny = true; }
+  }
+  saveConfig();
+  hideLoading();
+  return gotAny;
+}
+
+/* ---------- GERAR CÓDIGO COM OS LINKS/MAPEAMENTO PADRÃO DO SITE ---------- */
+function buildDefaultsCode(){
+  const urlsObj = {}, mapObj = {};
+  Object.keys(SHEETS).forEach(key=>{
+    urlsObj[key] = state.urls[key] || "";
+    mapObj[key] = state.mapping[key] || {};
+  });
+  return `const DEFAULT_URLS = ${JSON.stringify(urlsObj, null, 2)};\nconst DEFAULT_MAPPING = ${JSON.stringify(mapObj, null, 2)};`;
+}
+function copyDefaultsCodeToClipboard(){
+  if(!hasAnyData()){
+    alert('Carregue os dados primeiro (assim o código gerado já sai com os links e o mapeamento certos).');
+    return;
+  }
+  const code = buildDefaultsCode();
+  const instructions = 'Cole esse código no lugar do bloco "const DEFAULT_URLS = {...}" e "const DEFAULT_MAPPING = {...}" perto do início do arquivo do painel, salve e suba (commit) para o GitHub. A partir daí, o site busca os dados ao vivo direto da planilha para qualquer pessoa que abrir o link.';
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(code).then(()=>{
+      alert('Código copiado!\n\n'+instructions);
+    }).catch(()=>{
+      prompt('Não consegui copiar automaticamente — copie o texto abaixo manualmente:\n\n'+instructions, code);
+    });
+  } else {
+    prompt('Copie o texto abaixo manualmente:\n\n'+instructions, code);
+  }
 }
 
 /* ---------- CSV LOADING ----------
@@ -931,6 +1193,9 @@ function allAgentes(){
 function hasAnyData(){
   return Object.keys(SHEETS).some(k=> (state.rows[k]||[]).length>0);
 }
+function hasSheetData(key){
+  return (state.rows[key]||[]).length>0;
+}
 
 /* ---------- RANKING GERAL DE AGENTES ---------- */
 function buildAgentRanking(category){
@@ -1127,6 +1392,8 @@ function badgeFor(v, goodThreshold){
   if(!isFinite(v)) return "";
   return v>=goodThreshold ? `<span class="kpi-badge badge-good">bom</span>` : `<span class="kpi-badge badge-bad">atenção</span>`;
 }
+const SETOR_PALETTE = ['#7063F0','#FF7029','#22C55E','#F5A623','#0EA5E9','#EF4444','#A855F7','#14B8A6','#F43F5E','#84CC16','#9CA3AF','#C97B4A'];
+function colorForIndex(i){ return SETOR_PALETTE[i % SETOR_PALETTE.length]; }
 
 /* ============================================================
    TELA: VISÃO GERAL
@@ -1140,33 +1407,56 @@ function renderOverview(){
   const sat = computeCsat(getSatFiltered());
   const mon = computeMonitoria(getMonFiltered());
 
+  const hasReceived = hasSheetData('received');
+  const hasMade = hasSheetData('made');
+  const hasChat = hasSheetData('chat');
+  const hasSat = hasSheetData('satisfaction');
+  const hasMon = hasSheetData('monitoring');
+  const hasCanal = hasReceived || hasMade || hasChat;
+
   const volumeTotal = received.length + made.length + chatRows.length;
 
-  return `
-  <div class="section-title"><span class="chev">›</span> Indicadores gerais</div>
-  <div class="kpi-grid">
-    ${kpiCard("Volume total de atendimentos", fmtNum(volumeTotal), `Receptivo ${fmtNum(received.length)} · Ativo ${fmtNum(made.length)} · Chat ${fmtNum(chatRows.length)}`)}
-    ${kpiCard("Nível de serviço", fmtPct(rm.nivelServico/100), "", badgeFor(rm.nivelServico/100,0.8))}
-    ${kpiCard("Taxa de abandono", fmtPct(rm.pctAbandono), "não atendidas / entrantes (receptivo)", badgeFor(1-rm.pctAbandono,0.92))}
-    ${kpiCard("CSAT", fmtPct(sat.csat), `${fmtNum(sat.total)} avaliações · nota média ${fmtNum(sat.media,2)}`, badgeFor(sat.csat,0.85))}
-    ${kpiCard("Nota de monitoria", fmtPct(mon.media), `${fmtNum(mon.total)} monitorias · ${fmtPct(mon.pctMax)} nota máxima`, badgeFor(mon.media,0.85))}
-    ${kpiCard("TMA", fmtSec(avg([rm.tma, mm.tma].filter(isFinite))), "receptivo + ativo")}
-    ${kpiCard("TME", fmtSec(rm.tme), "tempo médio de espera (receptivo)")}
-  </div>
+  const kpis = [
+    kpiCard("Volume total de atendimentos", fmtNum(volumeTotal), `Receptivo ${fmtNum(received.length)} · Ativo ${fmtNum(made.length)} · Chat ${fmtNum(chatRows.length)}`),
+    hasReceived ? kpiCard("Nível de serviço", fmtPct(rm.nivelServico/100), "", badgeFor(rm.nivelServico/100,0.8)) : "",
+    hasReceived ? kpiCard("Taxa de abandono", fmtPct(rm.pctAbandono), "não atendidas / entrantes (receptivo)", badgeFor(1-rm.pctAbandono,0.92)) : "",
+    hasSat ? kpiCard("CSAT", fmtPct(sat.csat), `${fmtNum(sat.total)} avaliações · nota média ${fmtNum(sat.media,2)}`, badgeFor(sat.csat,0.85)) : "",
+    hasMon ? kpiCard("Nota de monitoria", fmtPct(mon.media), `${fmtNum(mon.total)} monitorias · ${fmtPct(mon.pctMax)} nota máxima`, badgeFor(mon.media,0.85)) : "",
+    (hasReceived||hasMade) ? kpiCard("TMA", fmtSec(avg([rm.tma, mm.tma].filter(isFinite))), "receptivo + ativo") : "",
+    hasReceived ? kpiCard("TME", fmtSec(rm.tme), "tempo médio de espera (receptivo)") : "",
+  ].filter(Boolean);
 
-  <div class="section-title"><span class="chev">›</span> Tendências</div>
-  <div class="grid-2">
-    <div class="card"><div class="card-title">Mix de canais por mês <small>quantidade de atendimentos</small></div>
-      <div class="chart-wrap"><canvas id="chOverviewMix"></canvas></div></div>
-    <div class="card"><div class="card-title">Volume por dia da semana</div>
-      <div class="chart-wrap"><canvas id="chOverviewWeekday"></canvas></div></div>
-  </div>
-  <div class="grid-2" style="margin-top:16px;">
-    <div class="card"><div class="card-title">Distribuição das notas de satisfação</div>
-      <div class="chart-wrap"><canvas id="chOverviewSat"></canvas></div></div>
-    <div class="card"><div class="card-title">Volume por setor</div>
-      <div class="chart-wrap"><canvas id="chOverviewSetor"></canvas></div></div>
-  </div>
+  const trendCards = [
+    hasCanal ? `<div class="card"><div class="card-title">Mix de canais por mês <small>quantidade de atendimentos</small></div>
+      <div class="chart-wrap"><canvas id="chOverviewMix"></canvas></div></div>` : "",
+    hasCanal ? `<div class="card"><div class="card-title">Volume por dia da semana</div>
+      <div class="chart-wrap"><canvas id="chOverviewWeekday"></canvas></div></div>` : "",
+    hasCanal ? `<div class="card"><div class="card-title">Atendimentos por setor em cada mês</div>
+      <div class="chart-wrap tall"><canvas id="chOverviewSetorMonth"></canvas></div></div>` : "",
+  ].filter(Boolean);
+
+  const setorCards = [
+    hasCanal ? `<div class="card"><div class="card-title">Volume por setor</div>
+      <div class="chart-wrap"><canvas id="chOverviewSetor"></canvas></div></div>` : "",
+    hasSat ? `<div class="card"><div class="card-title">Notas de satisfação por setor</div>
+      <div class="chart-wrap"><canvas id="chOverviewSatSetor"></canvas></div></div>` : "",
+  ].filter(Boolean);
+
+  const canalCards = [
+    hasCanal ? `<div class="card"><div class="card-title">Volume por canal <small>ligações ativas, receptivas e chat</small></div>
+      <div class="chart-wrap"><canvas id="chOverviewCanal"></canvas></div></div>` : "",
+    hasSat ? `<div class="card"><div class="card-title">Distribuição das notas de satisfação</div>
+      <div class="chart-wrap"><canvas id="chOverviewSat"></canvas></div></div>` : "",
+  ].filter(Boolean);
+
+  return `
+  ${usingPublishedSnapshot ? `<div class="note-box" style="margin-bottom:18px;">📦 Dados publicados em ${publishedSnapshotAt ? new Date(publishedSnapshotAt).toLocaleString('pt-BR') : "data desconhecida"}.</div>` : ""}
+  <div class="section-title"><span class="chev">›</span> Indicadores gerais</div>
+  <div class="kpi-grid">${kpis.join("")}</div>
+
+  ${trendCards.length ? `<div class="section-title"><span class="chev">›</span> Tendências</div><div class="grid-auto">${trendCards.join("")}</div>` : ""}
+  ${setorCards.length ? `<div class="section-title"><span class="chev">›</span> Setores</div><div class="grid-auto">${setorCards.join("")}</div>` : ""}
+  ${canalCards.length ? `<div class="section-title"><span class="chev">›</span> Canais e satisfação</div><div class="grid-auto">${canalCards.join("")}</div>` : ""}
   `;
 }
 function afterRenderOverview(){
@@ -1175,11 +1465,13 @@ function afterRenderOverview(){
     const made = getMadeFiltered();
     const chatRows = getChatFiltered();
     const sat = computeCsat(getSatFiltered());
+    const sats = getSatFiltered();
 
     // Agregação em um único passe por fonte (evita criar arrays gigantes de objetos novos)
-    const monthMap = new Map();   // "2026-01" -> {Receptivo,Ativo,Chat,_date}
+    const monthMap = new Map();        // "2026-01" -> {Receptivo,Ativo,Chat,_date}
     const weekday = [0,0,0,0,0,0,0];
-    const setorMap = new Map();
+    const setorMap = new Map();        // setor -> total (todos os canais)
+    const setorMonthMap = new Map();   // "2026-01" -> Map(setor -> total)
 
     function tally(rows, canalKey){
       for(let i=0;i<rows.length;i++){
@@ -1192,6 +1484,9 @@ function afterRenderOverview(){
         weekday[d.getDay()]++;
         const s = r.setor || "—";
         setorMap.set(s, (setorMap.get(s)||0)+1);
+        if(!setorMonthMap.has(mk)) setorMonthMap.set(mk, new Map());
+        const sm = setorMonthMap.get(mk);
+        sm.set(s, (sm.get(s)||0)+1);
       }
     }
     tally(received, "Receptivo");
@@ -1200,6 +1495,17 @@ function afterRenderOverview(){
 
     const months = Array.from(monthMap.keys()).sort();
     const monthLabels = months.map(m=>monthLabelShort(monthMap.get(m)._date));
+    const setorLabels = Array.from(setorMap.keys()).sort((a,b)=>setorMap.get(b)-setorMap.get(a));
+
+    // CSAT por setor
+    const bySatSetor = groupBy(sats, r=>r.setor||"—");
+    const satSetorLabels = Array.from(bySatSetor.keys()).sort();
+    const satSetorValues = satSetorLabels.map(s=>{ const c = computeCsat(bySatSetor.get(s)||[]).csat; return isFinite(c)?+(c*100).toFixed(1):0; });
+
+    // Volume por canal (totais)
+    const canalLabels = ['Receptivo','Ativo','Chat'];
+    const canalValues = [received.length, made.length, chatRows.length];
+    const canalColors = ['#7063F0','#FF7029','#1C1F26'];
 
     // IMPORTANTE: a criação dos gráficos é adiada para o próximo frame (requestAnimationFrame).
     // Criar um Chart.js no mesmíssimo instante em que o HTML acabou de ser inserido pode dar um
@@ -1208,43 +1514,89 @@ function afterRenderOverview(){
     requestAnimationFrame(()=>{
       if(currentScreen!=="overview") return; // usuário já trocou de tela nesse meio tempo
 
-      try{
-        charts.overviewMix = new Chart(document.getElementById('chOverviewMix'), {
-          type:'bar',
-          data:{labels: monthLabels, datasets:[
-            {label:'Receptivo', data: months.map(m=>monthMap.get(m).Receptivo), backgroundColor:'#7063F0', borderRadius:5},
-            {label:'Ativo', data: months.map(m=>monthMap.get(m).Ativo), backgroundColor:'#FF7029', borderRadius:5},
-            {label:'Chat', data: months.map(m=>monthMap.get(m).Chat), backgroundColor:'#1C1F26', borderRadius:5},
-          ]},
-          options: {...baseChartOpts(), plugins:{legend:{display:true, position:'bottom', labels:{boxWidth:10,font:{size:11}}}}}
-        });
-      }catch(e){ console.error("chOverviewMix", e); showChartError('chOverviewMix', e); }
+      if(document.getElementById('chOverviewMix')){
+        try{
+          charts.overviewMix = new Chart(document.getElementById('chOverviewMix'), {
+            type:'bar',
+            data:{labels: monthLabels, datasets:[
+              {label:'Receptivo', data: months.map(m=>monthMap.get(m).Receptivo), backgroundColor:'#7063F0', borderRadius:5},
+              {label:'Ativo', data: months.map(m=>monthMap.get(m).Ativo), backgroundColor:'#FF7029', borderRadius:5},
+              {label:'Chat', data: months.map(m=>monthMap.get(m).Chat), backgroundColor:'#1C1F26', borderRadius:5},
+            ]},
+            options: {...baseChartOpts(), plugins:{legend:{display:true, position:'bottom', labels:{boxWidth:10,font:{size:11}}}}}
+          });
+        }catch(e){ console.error("chOverviewMix", e); showChartError('chOverviewMix', e); }
+      }
 
-      try{
-        const wLabels = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
-        charts.overviewWeekday = new Chart(document.getElementById('chOverviewWeekday'), {
-          type:'bar',
-          data:{labels:wLabels, datasets:[{label:'Atendimentos', data:weekday, backgroundColor:'#7063F0', borderRadius:6}]},
-          options: baseChartOpts()
-        });
-      }catch(e){ console.error("chOverviewWeekday", e); showChartError('chOverviewWeekday', e); }
+      if(document.getElementById('chOverviewWeekday')){
+        try{
+          const wLabels = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+          charts.overviewWeekday = new Chart(document.getElementById('chOverviewWeekday'), {
+            type:'bar',
+            data:{labels:wLabels, datasets:[{label:'Atendimentos', data:weekday, backgroundColor:'#7063F0', borderRadius:6}]},
+            options: baseChartOpts()
+          });
+        }catch(e){ console.error("chOverviewWeekday", e); showChartError('chOverviewWeekday', e); }
+      }
 
-      try{
-        charts.overviewSat = new Chart(document.getElementById('chOverviewSat'), {
-          type:'bar',
-          data:{labels:['1','2','3','4','5'], datasets:[{label:'Avaliações', data:sat.dist, backgroundColor:['#EF4444','#F59E0B','#FBBF24','#84CC16','#22C55E'], borderRadius:6}]},
-          options: baseChartOpts()
-        });
-      }catch(e){ console.error("chOverviewSat", e); showChartError('chOverviewSat', e); }
+      if(document.getElementById('chOverviewSetorMonth')){
+        try{
+          const datasets = setorLabels.map((s,i)=>({
+            label: s,
+            data: months.map(m=> (setorMonthMap.get(m)||new Map()).get(s) || 0),
+            backgroundColor: colorForIndex(i),
+            stack: 'setores',
+            borderRadius:4,
+          }));
+          charts.overviewSetorMonth = new Chart(document.getElementById('chOverviewSetorMonth'), {
+            type:'bar',
+            data:{labels: monthLabels, datasets},
+            options: {...baseChartOpts(),
+              plugins:{legend:{display:true, position:'bottom', labels:{boxWidth:10,font:{size:10}}}},
+              scales:{ x:{...baseChartOpts().scales.x, stacked:true}, y:{...baseChartOpts().scales.y, stacked:true} }}
+          });
+        }catch(e){ console.error("chOverviewSetorMonth", e); showChartError('chOverviewSetorMonth', e); }
+      }
 
-      try{
-        const setorLabels = Array.from(setorMap.keys()).sort((a,b)=>setorMap.get(b)-setorMap.get(a));
-        charts.overviewSetor = new Chart(document.getElementById('chOverviewSetor'), {
-          type:'bar',
-          data:{labels:setorLabels, datasets:[{data:setorLabels.map(s=>setorMap.get(s)), backgroundColor:'#FF7029', borderRadius:6}]},
-          options: {...baseChartOpts(), indexAxis:'y'}
-        });
-      }catch(e){ console.error("chOverviewSetor", e); showChartError('chOverviewSetor', e); }
+      if(document.getElementById('chOverviewSetor')){
+        try{
+          charts.overviewSetor = new Chart(document.getElementById('chOverviewSetor'), {
+            type:'bar',
+            data:{labels:setorLabels, datasets:[{data:setorLabels.map(s=>setorMap.get(s)), backgroundColor:setorLabels.map((_,i)=>colorForIndex(i)), borderRadius:6}]},
+            options: {...baseChartOpts(), indexAxis:'y'}
+          });
+        }catch(e){ console.error("chOverviewSetor", e); showChartError('chOverviewSetor', e); }
+      }
+
+      if(document.getElementById('chOverviewSatSetor')){
+        try{
+          charts.overviewSatSetor = new Chart(document.getElementById('chOverviewSatSetor'), {
+            type:'bar',
+            data:{labels:satSetorLabels, datasets:[{data:satSetorValues, backgroundColor:satSetorLabels.map((_,i)=>colorForIndex(i)), borderRadius:6}]},
+            options: {...baseChartOpts(), scales:{...baseChartOpts().scales, y:{...baseChartOpts().scales.y, max:100}}}
+          });
+        }catch(e){ console.error("chOverviewSatSetor", e); showChartError('chOverviewSatSetor', e); }
+      }
+
+      if(document.getElementById('chOverviewCanal')){
+        try{
+          charts.overviewCanal = new Chart(document.getElementById('chOverviewCanal'), {
+            type:'doughnut',
+            data:{labels:canalLabels, datasets:[{data:canalValues, backgroundColor:canalColors}]},
+            options: {responsive:true, maintainAspectRatio:false, plugins:{legend:{display:true, position:'bottom', labels:{boxWidth:10,font:{size:11}}}}}
+          });
+        }catch(e){ console.error("chOverviewCanal", e); showChartError('chOverviewCanal', e); }
+      }
+
+      if(document.getElementById('chOverviewSat')){
+        try{
+          charts.overviewSat = new Chart(document.getElementById('chOverviewSat'), {
+            type:'bar',
+            data:{labels:['1','2','3','4','5'], datasets:[{label:'Avaliações', data:sat.dist, backgroundColor:['#EF4444','#F59E0B','#FBBF24','#84CC16','#22C55E'], borderRadius:6}]},
+            options: baseChartOpts()
+          });
+        }catch(e){ console.error("chOverviewSat", e); showChartError('chOverviewSat', e); }
+      }
     });
   }catch(e){ console.error("afterRenderOverview", e); }
 }
@@ -1259,6 +1611,14 @@ function renderSector(){
   const sats = getSatFiltered();
   const mons = getMonFiltered();
   const pauses = getPauseFiltered();
+
+  const hasReceived = hasSheetData('received');
+  const hasMade = hasSheetData('made');
+  const hasChat = hasSheetData('chat');
+  const hasSat = hasSheetData('satisfaction');
+  const hasMon = hasSheetData('monitoring');
+  const hasPause = hasSheetData('pause');
+  const hasCanal = hasReceived || hasMade || hasChat;
 
   const byRecSetor = groupBy(received, r=>r.setor||"—");
   const byMadeSetor = groupBy(made, r=>r.setor||"—");
@@ -1279,34 +1639,34 @@ function renderSector(){
     return {setor:s, volume, ...rm, tmaComb: avg([rm.tma, mm.tma].filter(isFinite)), csat:sat.csat, notaMon:mon.media, pauseTotal};
   }).sort((a,b)=>b.volume-a.volume);
 
+  const columns = [
+    {always:true, label:"Setor", render:r=>`<b>${esc(r.setor)}</b>`},
+    {always:true, label:"Volume", render:r=>fmtNum(r.volume)},
+    {show:hasReceived, label:"% Abandono", render:r=>fmtPct(r.pctAbandono)},
+    {show:hasReceived, label:"Nível de Serviço", render:r=>fmtPct(r.nivelServico/100)},
+    {show:hasReceived||hasMade, label:"TMA", render:r=>fmtSec(r.tmaComb)},
+    {show:hasReceived, label:"TME", render:r=>fmtSec(r.tme)},
+    {show:hasSat, label:"CSAT", render:r=>fmtPct(r.csat)},
+    {show:hasMon, label:"Nota Monitoria", render:r=>fmtPct(r.notaMon)},
+    {show:hasPause, label:"Tempo em Pausa", render:r=>fmtSec(r.pauseTotal)},
+  ].filter(c=>c.always||c.show);
+
+  const chartCards = [
+    hasCanal ? `<div class="card"><div class="card-title">Volume de atendimentos por setor</div>
+      <div class="chart-wrap"><canvas id="chSectorVolume"></canvas></div></div>` : "",
+    hasSat ? `<div class="card"><div class="card-title">CSAT por setor</div>
+      <div class="chart-wrap"><canvas id="chSectorCsat"></canvas></div></div>` : "",
+  ].filter(Boolean);
+
   return `
-  <div class="section-title"><span class="chev">›</span> Comparativo entre setores</div>
-  <div class="grid-2">
-    <div class="card"><div class="card-title">Volume de atendimentos por setor</div>
-      <div class="chart-wrap"><canvas id="chSectorVolume"></canvas></div></div>
-    <div class="card"><div class="card-title">CSAT por setor</div>
-      <div class="chart-wrap"><canvas id="chSectorCsat"></canvas></div></div>
-  </div>
+  ${chartCards.length ? `<div class="section-title"><span class="chev">›</span> Comparativo entre setores</div><div class="grid-auto">${chartCards.join("")}</div>` : ""}
 
   <div class="section-title"><span class="chev">›</span> Detalhamento por setor</div>
   <div class="card">
     <div class="table-wrap"><table class="data-table" id="tblSector">
-      <thead><tr>
-        <th>Setor</th><th>Volume</th><th>% Abandono</th><th>Nível de Serviço</th><th>TMA</th><th>TME</th>
-        <th>CSAT</th><th>Nota Monitoria</th><th>Tempo em Pausa</th>
-      </tr></thead>
+      <thead><tr>${columns.map(c=>`<th>${c.label}</th>`).join("")}</tr></thead>
       <tbody>
-        ${rows.map(r=>`<tr>
-          <td><b>${esc(r.setor)}</b></td>
-          <td>${fmtNum(r.volume)}</td>
-          <td>${fmtPct(r.pctAbandono)}</td>
-          <td>${fmtPct(r.nivelServico/100)}</td>
-          <td>${fmtSec(r.tmaComb)}</td>
-          <td>${fmtSec(r.tme)}</td>
-          <td>${fmtPct(r.csat)}</td>
-          <td>${fmtPct(r.notaMon)}</td>
-          <td>${fmtSec(r.pauseTotal)}</td>
-        </tr>`).join("")}
+        ${rows.map(r=>`<tr>${columns.map(c=>`<td>${c.render(r)}</td>`).join("")}</tr>`).join("")}
       </tbody>
     </table></div>
   </div>
@@ -1329,19 +1689,23 @@ function afterRenderSector(){
 
     requestAnimationFrame(()=>{
       if(currentScreen!=="sector") return;
-      try{
-        charts.sectorVolume = new Chart(document.getElementById('chSectorVolume'), {
-          type:'bar', data:{labels:setores, datasets:[{data:vol, backgroundColor:'#7063F0', borderRadius:6}]},
-          options: baseChartOpts()
-        });
-      }catch(e){ console.error("chSectorVolume", e); showChartError('chSectorVolume', e); }
+      if(document.getElementById('chSectorVolume')){
+        try{
+          charts.sectorVolume = new Chart(document.getElementById('chSectorVolume'), {
+            type:'bar', data:{labels:setores, datasets:[{data:vol, backgroundColor:setores.map((_,i)=>colorForIndex(i)), borderRadius:6}]},
+            options: baseChartOpts()
+          });
+        }catch(e){ console.error("chSectorVolume", e); showChartError('chSectorVolume', e); }
+      }
 
-      try{
-        charts.sectorCsat = new Chart(document.getElementById('chSectorCsat'), {
-          type:'bar', data:{labels:setores, datasets:[{data:csat, backgroundColor:'#FF7029', borderRadius:6}]},
-          options: {...baseChartOpts(), scales:{...baseChartOpts().scales, y:{...baseChartOpts().scales.y, max:100}}}
-        });
-      }catch(e){ console.error("chSectorCsat", e); showChartError('chSectorCsat', e); }
+      if(document.getElementById('chSectorCsat')){
+        try{
+          charts.sectorCsat = new Chart(document.getElementById('chSectorCsat'), {
+            type:'bar', data:{labels:setores, datasets:[{data:csat, backgroundColor:setores.map((_,i)=>colorForIndex(i)), borderRadius:6}]},
+            options: {...baseChartOpts(), scales:{...baseChartOpts().scales, y:{...baseChartOpts().scales.y, max:100}}}
+          });
+        }catch(e){ console.error("chSectorCsat", e); showChartError('chSectorCsat', e); }
+      }
     });
   }catch(e){ console.error("afterRenderSector", e); }
 }
@@ -1575,9 +1939,16 @@ function renderConfigScreen(){
   const loadedCount = Object.keys(SHEETS).filter(k=>(state.raw[k]||[]).length>0).length;
   const pendingBanner = (urlCount>0 && loadedCount<urlCount) ? `
     <div class="note-box">
-      Você tem <b>${urlCount}</b> fonte${urlCount>1?'s':''} com link salvo e <b>${loadedCount}</b> já carregada${loadedCount===1?'':'s'} nesta sessão.
+      Você tem <b>${urlCount}</b> fonte${urlCount>1?'s':''} com link salvo e <b>${loadedCount}</b> já carregada${loadedCount===1?'':'s'} no navegador.
       Os links ficam salvos mesmo que o carregamento não seja concluído — clique em "Carregar / Atualizar todas as fontes" quando quiser buscar os dados.
-      Isso não acontece mais automaticamente ao abrir o painel, justamente para não travar a tela toda vez com abas grandes.
+      O painel não busca as fontes automaticamente ao abrir, justamente para não travar a tela toda vez com abas grandes — mas o que já foi carregado antes continua aparecendo mesmo depois de recarregar a página (F5).
+    </div>` : "";
+  const snapshotStatusBanner = usingPublishedSnapshot ? `
+    <div class="note-box" style="border-color:var(--purple);">
+      📦 Estes dados vieram do arquivo <b>${PUBLISHED_SNAPSHOT_FILENAME}</b> publicado junto com o site
+      (gerado em <b>${publishedSnapshotAt ? new Date(publishedSnapshotAt).toLocaleString('pt-BR') : "data desconhecida"}</b>).
+      É por isso que aparecem prontos para quem só está visualizando, em qualquer navegador. Para atualizar, carregue os dados
+      novos abaixo e gere um novo arquivo para publicar.
     </div>` : "";
   return `
   <div class="note-box">
@@ -1586,6 +1957,7 @@ function renderConfigScreen(){
     O painel busca os dados direto da planilha — quando ela for atualizada, clique em "Atualizar dados" para recarregar.
     O mapeamento de colunas é sugerido automaticamente quando os nomes das colunas da sua planilha batem com os padrões usuais.
   </div>
+  ${snapshotStatusBanner}
   ${pendingBanner}
   ${blocks}
 
@@ -1597,9 +1969,55 @@ function renderConfigScreen(){
     <input type="file" id="importConfigInput" accept=".json,application/json" style="display:none;">
   </div>
   <p class="kpi-sub" style="margin-top:8px;">
-    Os links e mapeamentos ficam salvos automaticamente neste navegador. Como segurança extra (ex.: se limpar o cache ou trocar de computador),
-    exporte a configuração para um arquivo — e importe de volta quando precisar.
+    Os links, o mapeamento e os dados já carregados ficam salvos automaticamente neste navegador (recarregar a página não os apaga).
+    Abas muito grandes podem não caber no armazenamento do navegador — nesse caso um aviso aparece no bloco da aba. Como segurança extra
+    (ex.: se limpar o cache ou trocar de computador), exporte a configuração para um arquivo — e importe de volta quando precisar.
   </p>
+
+  <div class="card" style="margin-top:22px;border-color:var(--purple);">
+    <div class="card-title">🔴 Publicar dados AO VIVO (para qualquer pessoa, ex.: diretoria)</div>
+    <p class="hint" style="margin-top:-4px;">
+      Links salvos neste navegador não valem para quem abre o site em outro computador. Para que <b>qualquer pessoa</b> que abrir
+      o link do site já veja os dados prontos — e eles se atualizem sozinhos sempre que sua planilha mudar:
+    </p>
+    <ol style="margin:8px 0 14px;padding-left:20px;font-size:12.5px;color:var(--text-muted);line-height:1.7;">
+      <li>Carregue todos os dados aqui normalmente (botão "Carregar / Atualizar todas as fontes" acima).</li>
+      <li>Clique em <b>"Copiar código com os links/mapeamento"</b> abaixo.</li>
+      <li>Abra o arquivo <code>.html</code> do painel num editor de texto, ache o bloco <code>const DEFAULT_URLS = {...}</code>
+        (e <code>const DEFAULT_MAPPING = {...}</code>) perto do início do arquivo, e substitua os dois pelo código copiado.</li>
+      <li>Salve e suba (commit) o arquivo atualizado para o seu repositório no GitHub.</li>
+    </ol>
+    <div class="config-row">
+      <button class="btn btn-primary" id="btnCopyDefaultsCode">📋 Copiar código com os links/mapeamento</button>
+    </div>
+    <p class="kpi-sub" style="margin-top:10px;">
+      Depois disso, o site busca os dados <b>direto da planilha, ao vivo</b>, toda vez que alguém abre o link ou aperta F5 —
+      para qualquer navegador, sem precisar de nenhuma configuração prévia. Se a planilha mudar, é só atualizar a página para
+      ver os dados mais novos. Se a busca falhar por algum motivo (sem internet, planilha despublicada), o painel mantém na
+      tela os últimos dados que conseguiu buscar, em vez de ficar vazio.
+    </p>
+  </div>
+
+  <div class="card" style="margin-top:16px;">
+    <div class="card-title">📦 Alternativa: foto estática dos dados (sem depender de fetch ao vivo)</div>
+    <p class="hint" style="margin-top:-4px;">
+      Se preferir não deixar o site buscando a planilha ao vivo (ex.: planilha não pode ficar publicada), gere um arquivo com
+      uma foto dos dados no momento atual:
+    </p>
+    <ol style="margin:8px 0 14px;padding-left:20px;font-size:12.5px;color:var(--text-muted);line-height:1.7;">
+      <li>Carregue os dados aqui normalmente.</li>
+      <li>Clique em <b>"Gerar arquivo de dados para publicar"</b> — isso baixa um arquivo chamado <code>${PUBLISHED_SNAPSHOT_FILENAME}</code>.</li>
+      <li>Suba esse arquivo para a mesma pasta do <code>index.html</code> no GitHub (com esse nome exato).</li>
+    </ol>
+    <div class="config-row">
+      <button class="btn btn-ghost" id="btnExportSnapshot">📦 Gerar arquivo de dados para publicar</button>
+    </div>
+    <p class="kpi-sub" style="margin-top:10px;">
+      Isso é uma <b>foto</b> — não atualiza sozinha. Toda vez que a planilha mudar, repita os passos para publicar uma versão nova.
+      Também serve como reserva: se a opção "ao vivo" acima falhar na primeira visita de alguém (sem cache no navegador dela), o
+      painel tenta usar este arquivo antes de mostrar a tela de Configuração.
+    </p>
+  </div>
   `;
 }
 
@@ -1611,6 +2029,11 @@ function configBlock(key){
   const rowCount = (state.raw[key]||[]).length;
   const status = rowCount>0 ? `<span class="sheet-status ok">✓ ${rowCount.toLocaleString('pt-BR')} registros carregados</span>` :
     (url ? `<span class="sheet-status empty">Ainda não carregado</span>` : `<span class="sheet-status empty">Sem link definido</span>`);
+  const persistWarning = (rowCount>0 && rawPersistFailed[key]) ? `
+    <div class="note-box warn" style="margin-top:10px;">
+      Essa aba tem <b>${rowCount.toLocaleString('pt-BR')}</b> registros — grande demais para caber no armazenamento do navegador.
+      Os dados continuam aparecendo agora, mas se você recarregar a página (F5) essa aba específica vai precisar ser buscada de novo em "Carregar / Atualizar todas as fontes".
+    </div>` : "";
 
   return `
   <div class="config-block" data-sheet="${key}">
@@ -1622,6 +2045,7 @@ function configBlock(key){
       <button class="btn btn-ghost btn-sm" data-paste-toggle="${key}">Colar CSV manualmente</button>
     </div>
     <textarea class="textarea-fallback" data-paste-area="${key}" placeholder="Cole aqui o conteúdo CSV se o link automático não funcionar (CORS)."></textarea>
+    ${persistWarning}
     ${headers.length ? mappingUI(key, sheet, headers, mapping) : ""}
   </div>`;
 }
@@ -1662,6 +2086,7 @@ function bindConfigEvents(){
             loadPastedCsv(key, ta.value);
             normalizeSheetIfMapped(key);
             saveConfig();
+            saveRawData(key);
             renderScreen();
           }
         });
@@ -1681,6 +2106,8 @@ function bindConfigEvents(){
   document.getElementById('btnLoadAll')?.addEventListener('click', loadAllSheets);
   document.getElementById('btnSaveConfig')?.addEventListener('click', ()=>{ saveConfig(); alert('Configuração salva.'); });
   document.getElementById('btnExportConfig')?.addEventListener('click', exportConfig);
+  document.getElementById('btnExportSnapshot')?.addEventListener('click', exportPublishedSnapshot);
+  document.getElementById('btnCopyDefaultsCode')?.addEventListener('click', copyDefaultsCodeToClipboard);
   document.getElementById('btnImportConfig')?.addEventListener('click', ()=>{
     document.getElementById('importConfigInput').click();
   });
@@ -1746,6 +2173,7 @@ async function loadSheetWithFeedback(key){
   } else {
     normalizeSheetIfMapped(key);
     saveConfig();
+    await saveRawData(key);
   }
   renderScreen();
   updateSidebarStatus();
@@ -1762,7 +2190,7 @@ async function loadAllSheets(){
         showLoading(`Carregando ${SHEETS[key].label}... ${count.toLocaleString('pt-BR')} linhas`);
       });
       if(myGen!==loadGeneration) return; // cancelado durante esta aba
-      if(res.ok) normalizeSheetIfMapped(key);
+      if(res.ok){ normalizeSheetIfMapped(key); await saveRawData(key); }
       else if(res.reason==="timeout"){
         showLoading(`${SHEETS[key].label} demorou demais e foi pulada (mais de 2min30). Tentando a próxima...`);
         await new Promise(r=>setTimeout(r, 1200));
@@ -1810,25 +2238,43 @@ renderScreen = function(){
 /* ============================================================
    BOOTSTRAP
    ------------------------------------------------------------
-   Importante: NÃO recarregamos as fontes automaticamente ao abrir
-   o painel. Antes, isso fazia o app tentar buscar a aba pesada de
-   novo sozinho a cada visita — se travasse, a tela de carregamento
-   ficava por cima da Configuração antes mesmo dela mostrar os links
-   salvos, dando a impressão de que os links tinham desaparecido.
-   Agora: ao abrir, só carregamos os links/mapeamentos salvos e
-   mostramos a tela de Configuração com eles visíveis. Os dados só
-   são buscados quando você clica em "Carregar" — de forma explícita
-   e cancelável.
-   ============================================================ */
+   Ao abrir (ou apertar F5), o painel busca a versão mais recente das
+   planilhas automaticamente, usando os links salvos neste navegador OU os
+   links padrão embutidos no código (DEFAULT_URLS) — o que faz o site
+   funcionar "ao vivo" para qualquer pessoa, mesmo sem nenhuma configuração
+   prévia no navegador dela.
+
+   - Se já existem dados em cache (deste navegador): mostramos a tela de
+     Visão Geral IMEDIATAMENTE com o que já está salvo, e a busca ao vivo
+     roda por baixo dos panos (indicador discreto no topo) — só atualiza os
+     números quando terminar com sucesso. Se a busca falhar, os dados em
+     cache continuam na tela, nada desaparece.
+   - Se este navegador nunca carregou nada (ex.: primeira vez que alguém
+     abre o link): mostramos a tela de carregamento (com botão Cancelar)
+     enquanto busca pela primeira vez. Se não conseguir, tentamos o arquivo
+     estático publicado (agility-data.json), e só então caímos na tela de
+     Configuração, para conectar as fontes manualmente. */
 async function initApp(){
   renderNav();
   await loadConfig();
-  goToScreen("config");
-  updateSidebarStatus();
+  await loadAllRawData();
   document.getElementById('menuToggle').addEventListener('click', ()=>{
     document.getElementById('sidebar').classList.toggle('open');
   });
   document.getElementById('btnCancelLoad').addEventListener('click', cancelLoading);
+
+  if(hasAnyData()){
+    normalizeAllSheets();
+    goToScreen("overview");
+    updateSidebarStatus();
+    backgroundAutoRefresh(); // atualiza por baixo dos panos, sem apagar o que já está na tela
+  } else {
+    const gotLive = await foregroundAutoRefresh();
+    if(!gotLive) await loadPublishedSnapshotIfNeeded();
+    normalizeAllSheets();
+    goToScreen(hasAnyData() ? "overview" : "config");
+    updateSidebarStatus();
+  }
 }
 window.addEventListener('DOMContentLoaded', initApp);
 
