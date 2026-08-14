@@ -1190,9 +1190,10 @@ function computePausasPorTipo(rows){
     const media = avg(list.map(r=>r._sec));
     const limite = pauseLimitSecFor(tipo, list[0]?.setor);
     const alertOnly = pauseIsAlertOnly(tipo);
-    const excedentes = limite ? list.filter(r=> r._sec > limite) : [];
-    tipos.push({tipo, totalSec, media, limite, alertOnly, count:list.length, excedentesCount: excedentes.length,
-      excedentesPct: list.length? excedentes.length/list.length : NaN});
+    const excedentes = limite && !alertOnly ? list.filter(r=> r._sec > limite) : [];
+    const alertaMedia = !!(alertOnly && limite && isFinite(media) && media > limite);
+    tipos.push({tipo, totalSec, media, limite, alertOnly, alertaMedia, count:list.length, excedentesCount: excedentes.length,
+      excedentesPct: list.length && !alertOnly ? excedentes.length/list.length : NaN});
   });
   return tipos.sort((a,b)=>b.totalSec-a.totalSec);
 }
@@ -1203,7 +1204,7 @@ function computePausasPorSetor(rows){
     const totalSec = sum(list.map(r=>r._sec));
     const agentes = new Set(list.map(r=>r.agente)).size;
     let excedentesCount = 0;
-    list.forEach(r=>{ const lim = pauseLimitSecFor(r.tipo, r.setor); if(lim && r._sec>lim) excedentesCount++; });
+    list.forEach(r=>{ const lim = pauseLimitSecFor(r.tipo, r.setor); if(lim && !pauseIsAlertOnly(r.tipo) && r._sec>lim) excedentesCount++; });
     out.push({setor, totalSec, media: list.length? totalSec/list.length : NaN, count:list.length, agentes,
       excedentesPct: list.length? excedentesCount/list.length : NaN});
   });
@@ -1215,7 +1216,7 @@ function computePausasPorAgente(rows){
   porAgente.forEach((list, agente)=>{
     const totalSec = sum(list.map(r=>r._sec));
     let excedentesCount = 0;
-    list.forEach(r=>{ const lim = pauseLimitSecFor(r.tipo, r.setor); if(lim && r._sec>lim) excedentesCount++; });
+    list.forEach(r=>{ const lim = pauseLimitSecFor(r.tipo, r.setor); if(lim && !pauseIsAlertOnly(r.tipo) && r._sec>lim) excedentesCount++; });
     const porTipoAgente = groupBy(list, r=>r.tipo||"—");
     let tipoMaisUsado = "—", maxSec=-1;
     porTipoAgente.forEach((l2,tipo)=>{ const s=sum(l2.map(r=>r._sec)); if(s>maxSec){maxSec=s; tipoMaisUsado=tipo;} });
@@ -1492,7 +1493,7 @@ function renderOverview(){
 
   const kpis = [
     kpiCard("Volume total de atendimentos", fmtNum(volumeTotal), `Receptivo ${fmtNum(received.length)} · Ativo ${fmtNum(made.length)} · Chat ${fmtNum(chatRows.length)}`),
-    hasReceived ? kpiCard("Nível de serviço", fmtPct(rm.nivelServico/100), "", badgeFor(rm.nivelServico/100,0.8)) : "",
+    hasReceived ? kpiCard("Nível de serviço", fmtPct(rm.nivelServico/100), "chamadas atendidas em até 20 segundos * 100 / (chamadas atendidas na fila + chamadas abandonadas na fila)", badgeFor(rm.nivelServico/100,0.8)) : "",
     hasReceived ? kpiCard("Taxa de abandono", fmtPct(rm.pctAbandono), "não atendidas / entrantes (receptivo)", badgeFor(1-rm.pctAbandono,0.92)) : "",
     hasSat ? kpiCard("CSAT", fmtPct(sat.csat), `${fmtNum(sat.total)} avaliações · nota média ${fmtNum(sat.media,2)}`, badgeFor(sat.csat,0.85)) : "",
     hasMon ? kpiCard("Nota de monitoria", fmtPct(mon.media), `${fmtNum(mon.total)} monitorias · ${fmtPct(mon.pctMax)} nota máxima`, badgeFor(mon.media,0.85)) : "",
@@ -1836,9 +1837,9 @@ function renderPause(){
     <div class="table-wrap"><table class="data-table">
       <thead><tr><th>Tipo</th><th>Registros</th><th>Total</th><th>Média</th><th>Limite</th><th>Excedentes</th></tr></thead>
       <tbody>${tipos.map(t=>`<tr>
-        <td>${esc(t.tipo)}</td><td>${fmtNum(t.count)}</td><td>${fmtSec(t.totalSec)}</td><td>${fmtSec(t.media)}</td>
-        <td>${t.limite? fmtSec(t.limite)+(t.alertOnly?' (alerta)':'') : "—"}</td>
-        <td>${t.limite ? `<span class="pill ${t.excedentesCount>0?(t.alertOnly?'pill-orange':'pill-red'):'pill-green'}">${fmtNum(t.excedentesCount)} · ${fmtPct(t.excedentesPct)}</span>` : "—"}</td>
+        <td>${esc(t.tipo)}</td><td>${fmtNum(t.count)}</td><td>${fmtSec(t.totalSec)}</td><td>${t.alertaMedia ? `<span class="pill pill-orange">⚠️ ${fmtSec(t.media)}</span>` : fmtSec(t.media)}</td>
+        <td>${t.limite? fmtSec(t.limite)+(t.alertOnly?' (alerta média)':'') : "—"}</td>
+        <td>${t.alertOnly ? (t.alertaMedia ? `<span class="pill pill-orange">⚠️ Acima da média</span>` : `<span class="pill pill-green">✓ Dentro da média</span>`) : (t.limite ? `<span class="pill ${t.excedentesCount>0?'pill-red':'pill-green'}">${fmtNum(t.excedentesCount)} · ${fmtPct(t.excedentesPct)}</span>` : "—")}</td>
       </tr>`).join("")}</tbody>
     </table></div>
   </div>
