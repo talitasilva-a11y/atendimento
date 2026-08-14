@@ -1090,7 +1090,7 @@ function computeMadeMetrics(rows){
   const curtas = atendidas.filter(r=>isFinite(r._dur) && r._dur<60).length;
   const longas = atendidas.filter(r=>isFinite(r._dur) && r._dur>=60).length;
   const taxaContato = (atendidas.length+naoAtendidas.length) ? (longas*100/(atendidas.length+naoAtendidas.length)) : NaN;
-  const tma = avg(atendidas.map(r=>r._dur));
+  const tma = avg(atendidas.filter(r=>isFinite(r._dur) && r._dur>60).map(r=>r._dur));
   const transferFeitas = rows.filter(r=>isTransfer(r.transferPara));
   return {total, atendidas: atendidas.length, naoAtendidas: naoAtendidas.length, curtas, longas, taxaContato, tma,
     transferFeitas: transferFeitas.length};
