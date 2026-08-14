@@ -292,7 +292,7 @@ table.data-table tbody tr:hover{background:#FAFAFD;}
 
 // Limites de pausa em SEGUNDOS (a planilha registra duração em segundos)
 const PAUSE_TYPE_RULES = [
-  {match:["particular"], limitSec:5*60},
+  {match:["particular"], limitSec:5*60, alertOnly:true},
   {match:["refei"], limitSec:60*60},
   {match:["descanso"], limitSec:null, dependsOnSetor:true}, // 15min CAR / 10min demais
   {match:["backoffice"], limitSec:4*3600},
@@ -404,14 +404,6 @@ const SHEETS = {
       {key:"tipo", label:"Pausa (tipo)", required:true},
       {key:"duracao", label:"Duração (segundos)", required:true},
     ]
-  },
-  abandonment: {
-    label: "Taxa de Abandono (mensal)",
-    fields: [
-      {key:"data", label:"Data (mês)", required:true},
-      {key:"setor", label:"Setor", required:true},
-      {key:"taxa", label:"Taxa de abandono (fração ou %)", required:true},
-    ]
   }
 };
 
@@ -423,7 +415,7 @@ const HEADER_GUESSES = {
   transferPara:["transferiu para"], tempoEspera:["tempo em espera"], tempoLigacao:["tempo em ligação","tempo em ligacao"],
   destino:["destino"], conversasSat:["conversas com satisfação","conversas com satisfacao"],
   satisfacaoMedia:["satisfação média","satisfacao media"], total:["total"], tma:["tma"], tmeResp:["tme 1ª resposta","tme 1a resposta"],
-  canal:["canal"], nota:["nota"], tipo:["pausa"], duracao:["duracao","duração"], taxa:["taxa de abandono"]
+  canal:["canal"], nota:["nota"], tipo:["pausa"], duracao:["duracao","duração"]
 };
 function autoGuessMapping(sheetKey, headers){
   const map = {};
@@ -438,6 +430,26 @@ function autoGuessMapping(sheetKey, headers){
   return map;
 }
 
+/* ---------- STORAGE ----------
+   Este arquivo pode ser aberto de dois jeitos: dentro do Claude (onde existe
+   window.storage) ou como um site normal, por exemplo hospedado no GitHub
+   Pages (onde window.storage NÃO existe). Detectamos qual ambiente está
+   disponível e usamos localStorage como alternativa — assim a configuração
+   nunca se perde só porque foi aberta fora do Claude. */
+const HAS_ARTIFACT_STORAGE = (typeof window!=="undefined") && !!window.storage && typeof window.storage.get==="function";
+async function storageGetRaw(key){
+  if(HAS_ARTIFACT_STORAGE){
+    try{ const r = await window.storage.get(key, false); return r ? r.value : null; }catch(e){ return null; }
+  }
+  try{ return window.localStorage.getItem(key); }catch(e){ return null; }
+}
+async function storageSetRaw(key, value){
+  if(HAS_ARTIFACT_STORAGE){
+    try{ await window.storage.set(key, value, false); return true; }catch(e){ return false; }
+  }
+  try{ window.localStorage.setItem(key, value); return true; }catch(e){ return false; }
+}
+
 let state = {
   urls: {},
   mapping: {},
@@ -447,17 +459,14 @@ let state = {
   filters: { period: "all", setor: "all", agente: "all", canal: "all" }
 };
 
-/* ---------- STORAGE ---------- */
 async function saveConfig(){
-  try{
-    await window.storage.set('agility_config', JSON.stringify({urls:state.urls, mapping:state.mapping}), false);
-  }catch(e){ console.warn("storage save failed", e); }
+  await storageSetRaw('agility_config', JSON.stringify({urls:state.urls, mapping:state.mapping}));
 }
 async function loadConfig(){
   try{
-    const r = await window.storage.get('agility_config', false);
-    if(r && r.value){
-      const parsed = JSON.parse(r.value);
+    const value = await storageGetRaw('agility_config');
+    if(value){
+      const parsed = JSON.parse(value);
       state.urls = parsed.urls || {};
       state.mapping = parsed.mapping || {};
     }
@@ -619,7 +628,6 @@ const SHEET_ENRICHERS = {
   // normalizamos sempre para fração 0–1 aqui, uma única vez, para não gerar ranking com "9827%".
   monitoring: r=>{ r._date=parseDateFlexible(r.data); r._nota=normalizeFraction(toNumber(r.nota)); },
   pause: r=>{ r._date=parseDateFlexible(r.data); r._sec=toNumber(r.duracao); },
-  abandonment: r=>{ r._date=parseDateFlexible(r.data); r._taxa=computeAbandonRate(r); },
 };
 function normalizeSheet(key){
   const map = state.mapping[key] || {};
@@ -805,11 +813,28 @@ function computeTransferSummary(){
 
   const porAgente = groupBy(feitas, r=>r.agente||"—");
   const porSetor = groupBy(feitas, r=>r.setor||"—");
-  let topAgente = null, topSetor = null;
-  porAgente.forEach((list,agente)=>{ if(!topAgente || list.length>topAgente.count) topAgente = {agente, count:list.length}; });
-  porSetor.forEach((list,setor)=>{ if(!topSetor || list.length>topSetor.count) topSetor = {setor, count:list.length}; });
+  const agenteRank = Array.from(porAgente, ([agente,list])=>({agente, count:list.length})).sort((a,b)=>b.count-a.count);
+  const setorRank = Array.from(porSetor, ([setor,list])=>({setor, count:list.length})).sort((a,b)=>b.count-a.count);
 
-  return {totalTransferencias: feitas.length, totalChamadas: combined.length, topAgente, topSetor};
+  return {totalTransferencias: feitas.length, totalChamadas: combined.length, agenteRank, setorRank,
+    topAgente: agenteRank[0]||null, topSetor: setorRank[0]||null};
+}
+
+/* ---------- PERFORMANCE DE CHAT POR SETOR ---------- */
+function computeChatPerfBySetor(){
+  const setores = allSetores();
+  const chatRows = getChatFiltered();
+  const perfRows = getChatPerfFiltered();
+  const satRows = getSatFiltered();
+  const byChatSetor = groupBy(chatRows, r=>r.setor||"—");
+  const byPerfSetor = groupBy(perfRows, r=>r.setor||"—");
+  const bySatSetor = groupBy(satRows, r=>r.setor||"—");
+  return setores.map(s=>{
+    const total = (byChatSetor.get(s)||[]).length;
+    const perf = computeChatPerfMetrics(byPerfSetor.get(s)||[]);
+    const csat = computeCsat(bySatSetor.get(s)||[]).csat;
+    return {setor:s, total, tmeResp:perf.tmeResp, tma:perf.tma, csat};
+  }).filter(r=>r.total>0 || isFinite(r.tmeResp) || isFinite(r.tma) || isFinite(r.csat));
 }
 
 /* ---------- SATISFAÇÃO (CSAT) ---------- */
@@ -888,17 +913,6 @@ function computePausasPorAgente(rows){
   return out.sort((a,b)=>b.totalSec-a.totalSec);
 }
 
-/* ---------- ABANDONO MENSAL (aba dedicada) ---------- */
-function getAbandonFiltered(){
-  const rows = state.rows.abandonment||[];
-  return rows.filter(r=> state.filters.setor==="all" || (r.setor||"")===state.filters.setor);
-}
-function computeAbandonRate(r){
-  const t = toNumber(r.taxa);
-  if(!isFinite(t)) return NaN;
-  return t>1 ? t/100 : t;
-}
-
 /* ---------- VOLUMES COMBINADOS (Overview / Setor / Detalhado) ---------- */
 function allSetores(){
   const s = new Set();
@@ -922,37 +936,42 @@ function hasAnyData(){
 function buildAgentRanking(category){
   const received = getReceivedFiltered();
   const made = getMadeFiltered();
+  const chatRows = getChatFiltered();
   const sats = getSatFiltered();
   const mons = getMonFiltered();
 
   const agentSet = new Set();
   received.forEach(r=>{ if(r.agente) agentSet.add(r.agente); });
   made.forEach(r=>{ if(r.agente) agentSet.add(r.agente); });
+  chatRows.forEach(r=>{ if(r.agente) agentSet.add(r.agente); });
   sats.forEach(r=>{ if(r.agente) agentSet.add(r.agente); });
   mons.forEach(r=>{ if(r.agente) agentSet.add(r.agente); });
 
   const byRec = groupBy(received, r=>r.agente||"—");
   const byMade = groupBy(made, r=>r.agente||"—");
+  const byChat = groupBy(chatRows, r=>r.agente||"—");
   const bySat = groupBy(sats, r=>r.agente||"—");
   const byMon = groupBy(mons, r=>r.agente||"—");
 
   const list = Array.from(agentSet).map(agente=>{
     const recList = byRec.get(agente)||[];
     const madeList = byMade.get(agente)||[];
+    const chatList = byChat.get(agente)||[];
     // "Chamadas realizadas" no ranking só conta atendidas com duração >= 60s (contato real, não caixa postal)
     const madeValidList = madeList.filter(r=>r._status==="Atendida" && isFinite(r._dur) && r._dur>=60);
     const sList = (bySat.get(agente)||[]).filter(r=>isFinite(r._nota));
     const mList = (byMon.get(agente)||[]).filter(r=>isFinite(r._nota));
-    const total = recList.length + madeValidList.length;
+    // Total = soma bruta de recebidas + realizadas (>=60s) + atendimentos de chat. Sem bônus escondido.
+    const total = recList.length + madeValidList.length + chatList.length;
     const csat = sList.length ? sList.filter(r=>r._nota>=4).length/sList.length : NaN;
     const notaMonMedia = mList.length ? avg(mList.map(r=>r._nota)) : NaN; // já normalizada 0–1 (ver SHEET_ENRICHERS)
     let score;
-    if(category==="geral") score = total + (isFinite(csat)?csat*20:0) + (isFinite(notaMonMedia)?notaMonMedia*20:0);
+    if(category==="geral") score = total;
     else if(category==="recebidas") score = recList.length;
     else if(category==="realizadas") score = madeValidList.length;
     else if(category==="satisfacao") score = isFinite(csat)? csat*100 : -1;
     else if(category==="monitoria") score = isFinite(notaMonMedia)? notaMonMedia*100 : -1;
-    return {agente, total, recebidas:recList.length, realizadas:madeValidList.length, csat, notaMonMedia, score};
+    return {agente, total, recebidas:recList.length, realizadas:madeValidList.length, chat:chatList.length, csat, notaMonMedia, score};
   });
   return list.filter(a=>a.score>=0 || category==="geral").sort((a,b)=>b.score-a.score);
 }
@@ -1090,6 +1109,11 @@ function bindScreenEvents(){
     });
   });
 }
+function showChartError(canvasId, err){
+  const canvas = document.getElementById(canvasId);
+  if(!canvas || !canvas.parentElement) return;
+  canvas.parentElement.innerHTML = `<p class="kpi-sub" style="color:var(--red);">Não foi possível desenhar este gráfico (${(err&&err.message)||'erro desconhecido'}). Os números continuam corretos nas outras telas/tabelas.</p>`;
+}
 function baseChartOpts(){
   return {responsive:true, maintainAspectRatio:false,
     plugins:{legend:{display:false}},
@@ -1125,9 +1149,9 @@ function renderOverview(){
     ${kpiCard("Nível de serviço", fmtPct(rm.nivelServico/100), "", badgeFor(rm.nivelServico/100,0.8))}
     ${kpiCard("Taxa de abandono", fmtPct(rm.pctAbandono), "não atendidas / entrantes (receptivo)", badgeFor(1-rm.pctAbandono,0.92))}
     ${kpiCard("CSAT", fmtPct(sat.csat), `${fmtNum(sat.total)} avaliações · nota média ${fmtNum(sat.media,2)}`, badgeFor(sat.csat,0.85))}
-    ${kpiCard("Nota de monitoria", fmtNum(mon.media,2), `${fmtNum(mon.total)} monitorias · ${fmtPct(mon.pctMax)} nota máxima`, badgeFor(mon.media,0.85))}
-    ${kpiCard("TMA médio", fmtSec(avg([rm.tma, mm.tma].filter(isFinite))), "receptivo + ativo")}
-    ${kpiCard("TME médio", fmtSec(rm.tme), "tempo médio de espera (receptivo)")}
+    ${kpiCard("Nota de monitoria", fmtPct(mon.media), `${fmtNum(mon.total)} monitorias · ${fmtPct(mon.pctMax)} nota máxima`, badgeFor(mon.media,0.85))}
+    ${kpiCard("TMA", fmtSec(avg([rm.tma, mm.tma].filter(isFinite))), "receptivo + ativo")}
+    ${kpiCard("TME", fmtSec(rm.tme), "tempo médio de espera (receptivo)")}
   </div>
 
   <div class="section-title"><span class="chev">›</span> Tendências</div>
@@ -1177,43 +1201,51 @@ function afterRenderOverview(){
     const months = Array.from(monthMap.keys()).sort();
     const monthLabels = months.map(m=>monthLabelShort(monthMap.get(m)._date));
 
-    try{
-      charts.overviewMix = new Chart(document.getElementById('chOverviewMix'), {
-        type:'bar',
-        data:{labels: monthLabels, datasets:[
-          {label:'Receptivo', data: months.map(m=>monthMap.get(m).Receptivo), backgroundColor:'#7063F0', borderRadius:5},
-          {label:'Ativo', data: months.map(m=>monthMap.get(m).Ativo), backgroundColor:'#FF7029', borderRadius:5},
-          {label:'Chat', data: months.map(m=>monthMap.get(m).Chat), backgroundColor:'#1C1F26', borderRadius:5},
-        ]},
-        options: {...baseChartOpts(), plugins:{legend:{display:true, position:'bottom', labels:{boxWidth:10,font:{size:11}}}}}
-      });
-    }catch(e){ console.error("chOverviewMix", e); }
+    // IMPORTANTE: a criação dos gráficos é adiada para o próximo frame (requestAnimationFrame).
+    // Criar um Chart.js no mesmíssimo instante em que o HTML acabou de ser inserido pode dar um
+    // canvas com largura/altura ainda zeradas (o navegador não terminou o layout) — o gráfico é
+    // "desenhado" mas fica invisível, sem gerar nenhum erro. Adiar um frame resolve isso.
+    requestAnimationFrame(()=>{
+      if(currentScreen!=="overview") return; // usuário já trocou de tela nesse meio tempo
 
-    try{
-      const wLabels = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
-      charts.overviewWeekday = new Chart(document.getElementById('chOverviewWeekday'), {
-        type:'bar',
-        data:{labels:wLabels, datasets:[{label:'Atendimentos', data:weekday, backgroundColor:'#7063F0', borderRadius:6}]},
-        options: baseChartOpts()
-      });
-    }catch(e){ console.error("chOverviewWeekday", e); }
+      try{
+        charts.overviewMix = new Chart(document.getElementById('chOverviewMix'), {
+          type:'bar',
+          data:{labels: monthLabels, datasets:[
+            {label:'Receptivo', data: months.map(m=>monthMap.get(m).Receptivo), backgroundColor:'#7063F0', borderRadius:5},
+            {label:'Ativo', data: months.map(m=>monthMap.get(m).Ativo), backgroundColor:'#FF7029', borderRadius:5},
+            {label:'Chat', data: months.map(m=>monthMap.get(m).Chat), backgroundColor:'#1C1F26', borderRadius:5},
+          ]},
+          options: {...baseChartOpts(), plugins:{legend:{display:true, position:'bottom', labels:{boxWidth:10,font:{size:11}}}}}
+        });
+      }catch(e){ console.error("chOverviewMix", e); showChartError('chOverviewMix', e); }
 
-    try{
-      charts.overviewSat = new Chart(document.getElementById('chOverviewSat'), {
-        type:'bar',
-        data:{labels:['1','2','3','4','5'], datasets:[{label:'Avaliações', data:sat.dist, backgroundColor:['#EF4444','#F59E0B','#FBBF24','#84CC16','#22C55E'], borderRadius:6}]},
-        options: baseChartOpts()
-      });
-    }catch(e){ console.error("chOverviewSat", e); }
+      try{
+        const wLabels = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+        charts.overviewWeekday = new Chart(document.getElementById('chOverviewWeekday'), {
+          type:'bar',
+          data:{labels:wLabels, datasets:[{label:'Atendimentos', data:weekday, backgroundColor:'#7063F0', borderRadius:6}]},
+          options: baseChartOpts()
+        });
+      }catch(e){ console.error("chOverviewWeekday", e); showChartError('chOverviewWeekday', e); }
 
-    try{
-      const setorLabels = Array.from(setorMap.keys()).sort((a,b)=>setorMap.get(b)-setorMap.get(a));
-      charts.overviewSetor = new Chart(document.getElementById('chOverviewSetor'), {
-        type:'bar',
-        data:{labels:setorLabels, datasets:[{data:setorLabels.map(s=>setorMap.get(s)), backgroundColor:'#FF7029', borderRadius:6}]},
-        options: {...baseChartOpts(), indexAxis:'y'}
-      });
-    }catch(e){ console.error("chOverviewSetor", e); }
+      try{
+        charts.overviewSat = new Chart(document.getElementById('chOverviewSat'), {
+          type:'bar',
+          data:{labels:['1','2','3','4','5'], datasets:[{label:'Avaliações', data:sat.dist, backgroundColor:['#EF4444','#F59E0B','#FBBF24','#84CC16','#22C55E'], borderRadius:6}]},
+          options: baseChartOpts()
+        });
+      }catch(e){ console.error("chOverviewSat", e); showChartError('chOverviewSat', e); }
+
+      try{
+        const setorLabels = Array.from(setorMap.keys()).sort((a,b)=>setorMap.get(b)-setorMap.get(a));
+        charts.overviewSetor = new Chart(document.getElementById('chOverviewSetor'), {
+          type:'bar',
+          data:{labels:setorLabels, datasets:[{data:setorLabels.map(s=>setorMap.get(s)), backgroundColor:'#FF7029', borderRadius:6}]},
+          options: {...baseChartOpts(), indexAxis:'y'}
+        });
+      }catch(e){ console.error("chOverviewSetor", e); showChartError('chOverviewSetor', e); }
+    });
   }catch(e){ console.error("afterRenderOverview", e); }
 }
 /* ============================================================
@@ -1272,7 +1304,7 @@ function renderSector(){
           <td>${fmtSec(r.tmaComb)}</td>
           <td>${fmtSec(r.tme)}</td>
           <td>${fmtPct(r.csat)}</td>
-          <td>${fmtNum(r.notaMon,2)}</td>
+          <td>${fmtPct(r.notaMon)}</td>
           <td>${fmtSec(r.pauseTotal)}</td>
         </tr>`).join("")}
       </tbody>
@@ -1295,19 +1327,22 @@ function afterRenderSector(){
     const vol = setores.map(s=>(byRecSetor.get(s)||[]).length + (byMadeSetor.get(s)||[]).length + (byChatSetor.get(s)||[]).length);
     const csat = setores.map(s=>{ const c = computeCsat(bySatSetor.get(s)||[]).csat; return isFinite(c)?c*100:0; });
 
-    try{
-      charts.sectorVolume = new Chart(document.getElementById('chSectorVolume'), {
-        type:'bar', data:{labels:setores, datasets:[{data:vol, backgroundColor:'#7063F0', borderRadius:6}]},
-        options: baseChartOpts()
-      });
-    }catch(e){ console.error("chSectorVolume", e); }
+    requestAnimationFrame(()=>{
+      if(currentScreen!=="sector") return;
+      try{
+        charts.sectorVolume = new Chart(document.getElementById('chSectorVolume'), {
+          type:'bar', data:{labels:setores, datasets:[{data:vol, backgroundColor:'#7063F0', borderRadius:6}]},
+          options: baseChartOpts()
+        });
+      }catch(e){ console.error("chSectorVolume", e); showChartError('chSectorVolume', e); }
 
-    try{
-      charts.sectorCsat = new Chart(document.getElementById('chSectorCsat'), {
-        type:'bar', data:{labels:setores, datasets:[{data:csat, backgroundColor:'#FF7029', borderRadius:6}]},
-        options: {...baseChartOpts(), scales:{...baseChartOpts().scales, y:{...baseChartOpts().scales.y, max:100}}}
-      });
-    }catch(e){ console.error("chSectorCsat", e); }
+      try{
+        charts.sectorCsat = new Chart(document.getElementById('chSectorCsat'), {
+          type:'bar', data:{labels:setores, datasets:[{data:csat, backgroundColor:'#FF7029', borderRadius:6}]},
+          options: {...baseChartOpts(), scales:{...baseChartOpts().scales, y:{...baseChartOpts().scales.y, max:100}}}
+        });
+      }catch(e){ console.error("chSectorCsat", e); showChartError('chSectorCsat', e); }
+    });
   }catch(e){ console.error("afterRenderSector", e); }
 }
 
@@ -1347,7 +1382,7 @@ function rankRow(a, i){
     <div class="rank-avatar">${initials}</div>
     <div class="rank-info">
       <div class="rank-name">${esc(a.agente)}</div>
-      <div class="rank-sub">${fmtNum(a.recebidas)} recebidas · ${fmtNum(a.realizadas)} realizadas · CSAT ${fmtPct(a.csat)} · Monitoria ${fmtNum(a.notaMonMedia,2)}</div>
+      <div class="rank-sub">${fmtNum(a.recebidas)} recebidas · ${fmtNum(a.realizadas)} realizadas (≥60s) · ${fmtNum(a.chat)} chat · CSAT ${fmtPct(a.csat)} · Monitoria ${fmtPct(a.notaMonMedia)}</div>
     </div>
     <div class="rank-score">
       <div class="val">${scoreDisplay}</div>
@@ -1385,7 +1420,7 @@ function renderQueue(){
     ${kpiCard("TME", fmtSec(rm.tme))}
     ${kpiCard("TMA", fmtSec(rm.tma))}
     ${kpiCard("Rechamadas", fmtPct(rm.pctRechamadas), "sobre o total de entrantes na fila")}
-    ${kpiCard("Taxa de contato (ativo)", fmtPct(mm.taxaContato/100))}
+    ${kpiCard("Taxa de contato (ativo)", fmtPct(mm.taxaContato/100), "feitas atendidas ≥60s / (feitas atendidas + feitas não atendidas)")}
   </div>
 
   <div class="note-box warn" style="margin-top:14px;">
@@ -1416,28 +1451,7 @@ function renderQueue(){
       </tbody>
     </table></div>
   </div>
-
-  <div class="section-title"><span class="chev">›</span> Tendência mensal de abandono <small style="font-weight:400;color:var(--text-muted);">(fonte: aba Taxa de Abandono)</small></div>
-  <div class="card"><div class="chart-wrap"><canvas id="chAbandonTrend"></canvas></div></div>
   `;
-}
-function afterRenderQueue(){
-  try{
-    const rows = getAbandonFiltered();
-    if(!rows.length){ const c = document.getElementById('chAbandonTrend'); if(c) c.parentElement.innerHTML = '<p class="kpi-sub">Sem dados na aba Taxa de Abandono para o filtro atual.</p>'; return; }
-    const validRows = rows.filter(r=>r._date);
-    const bySetor = groupBy(validRows, r=>r.setor||"—");
-    const allMonths = Array.from(new Set(validRows.map(r=>monthKeyISO(r._date)))).sort();
-    const palette = ['#7063F0','#FF7029','#1C1F26','#22C55E','#F59E0B'];
-    const datasets = Array.from(bySetor.keys()).map((s,i)=>({
-      label:s, data: allMonths.map(m=>{ const r = bySetor.get(s).find(x=>monthKeyISO(x._date)===m); return r? r._taxa*100 : null; }),
-      borderColor:palette[i%palette.length], backgroundColor:palette[i%palette.length]+'22', tension:.3, fill:false
-    }));
-    charts.abandonTrend = new Chart(document.getElementById('chAbandonTrend'), {
-      type:'line', data:{labels:allMonths.map(m=>monthLabelFromISO(m)), datasets},
-      options:{...baseChartOpts(), plugins:{legend:{display:true, position:'bottom', labels:{boxWidth:10,font:{size:11}}}}}
-    });
-  }catch(e){ console.error("afterRenderQueue", e); }
 }
 
 /* ============================================================
@@ -1449,6 +1463,7 @@ function renderChat(){
   const pm = computeChatPerfMetrics(perfRows);
   const satChat = computeCsat(getSatFiltered());
   const tr = computeTransferSummary();
+  const bySetor = computeChatPerfBySetor();
 
   return `
   <div class="section-title"><span class="chev">›</span> Performance do Chat</div>
@@ -1459,15 +1474,36 @@ function renderChat(){
     ${kpiCard("CSAT (canal chat)", fmtPct(satChat.csat), `${fmtNum(satChat.total)} avaliações`)}
   </div>
 
+  <div class="card" style="margin-top:14px;">
+    <div class="card-title">Performance do chat por setor</div>
+    <div class="table-wrap"><table class="data-table">
+      <thead><tr><th>Setor</th><th>Total de chats</th><th>TME 1ª resposta</th><th>TMA</th><th>CSAT</th></tr></thead>
+      <tbody>${bySetor.length ? bySetor.map(s=>`<tr>
+        <td><b>${esc(s.setor)}</b></td><td>${fmtNum(s.total)}</td><td>${fmtSec(s.tmeResp)}</td><td>${fmtSec(s.tma)}</td><td>${fmtPct(s.csat)}</td>
+      </tr>`).join("") : `<tr><td colspan="5" style="color:var(--text-muted)">Sem dados de chat por setor no período/filtro</td></tr>`}</tbody>
+    </table></div>
+  </div>
+
   <div class="note-box" style="margin-top:14px;">
     As transferências são registradas nas abas de <b>Chamadas Recebidas/Realizadas</b> (campo "Transferiu para"), não no chat.
   </div>
 
-  <div class="section-title"><span class="chev">›</span> Transferências entre agentes (chamadas)</div>
+  <div class="section-title"><span class="chev">›</span> Transferências entre setores e agentes (chamadas)</div>
   <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));">
-    ${kpiCard("Setor que mais transfere", tr.topSetor?esc(tr.topSetor.setor):"—", tr.topSetor?fmtNum(tr.topSetor.count)+" transferências":"")}
-    ${kpiCard("Agente que mais transfere", tr.topAgente?esc(tr.topAgente.agente):"—", tr.topAgente?fmtNum(tr.topAgente.count)+" transferências":"")}
+    ${kpiCard("Total de transferências", fmtNum(tr.totalTransferencias))}
     ${kpiCard("Taxa de transferência", fmtPct(tr.totalChamadas? tr.totalTransferencias/tr.totalChamadas : NaN), "sobre o total de chamadas")}
+  </div>
+  <div class="grid-2" style="margin-top:14px;">
+    <div class="card">
+      <div class="card-title">Ranking de setores que mais transferem</div>
+      <div class="table-wrap"><table class="data-table"><thead><tr><th>#</th><th>Setor</th><th>Transferências</th></tr></thead>
+      <tbody>${tr.setorRank.length? tr.setorRank.slice(0,20).map((r,i)=>`<tr><td>${i+1}</td><td>${esc(r.setor)}</td><td>${fmtNum(r.count)}</td></tr>`).join("") : `<tr><td colspan="3" style="color:var(--text-muted)">Sem transferências no período/filtro</td></tr>`}</tbody></table></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Ranking de agentes que mais transferem</div>
+      <div class="table-wrap"><table class="data-table"><thead><tr><th>#</th><th>Agente</th><th>Transferências</th></tr></thead>
+      <tbody>${tr.agenteRank.length? tr.agenteRank.slice(0,20).map((r,i)=>`<tr><td>${i+1}</td><td>${esc(r.agente)}</td><td>${fmtNum(r.count)}</td></tr>`).join("") : `<tr><td colspan="3" style="color:var(--text-muted)">Sem transferências no período/filtro</td></tr>`}</tbody></table></div>
+    </div>
   </div>
   `;
 }
@@ -1494,20 +1530,16 @@ function renderPause(){
   </div>
 
   <div class="section-title"><span class="chev">›</span> Por tipo de pausa</div>
-  <div class="grid-2">
-    <div class="card"><div class="card-title">Tempo total por tipo</div>
-      <div class="chart-wrap"><canvas id="chPauseType"></canvas></div></div>
-    <div class="card">
-      <div class="card-title">Detalhamento <small>limite considerado (segundos convertidos)</small></div>
-      <div class="table-wrap"><table class="data-table">
-        <thead><tr><th>Tipo</th><th>Registros</th><th>Total</th><th>Média</th><th>Limite</th><th>Excedentes</th></tr></thead>
-        <tbody>${tipos.map(t=>`<tr>
-          <td>${esc(t.tipo)}</td><td>${fmtNum(t.count)}</td><td>${fmtSec(t.totalSec)}</td><td>${fmtSec(t.media)}</td>
-          <td>${t.limite? fmtSec(t.limite)+(t.alertOnly?' (alerta)':'') : "—"}</td>
-          <td>${t.limite ? `<span class="pill ${t.excedentesCount>0?(t.alertOnly?'pill-orange':'pill-red'):'pill-green'}">${fmtNum(t.excedentesCount)} · ${fmtPct(t.excedentesPct)}</span>` : "—"}</td>
-        </tr>`).join("")}</tbody>
-      </table></div>
-    </div>
+  <div class="card">
+    <div class="card-title">Detalhamento <small>limite considerado (segundos convertidos)</small></div>
+    <div class="table-wrap"><table class="data-table">
+      <thead><tr><th>Tipo</th><th>Registros</th><th>Total</th><th>Média</th><th>Limite</th><th>Excedentes</th></tr></thead>
+      <tbody>${tipos.map(t=>`<tr>
+        <td>${esc(t.tipo)}</td><td>${fmtNum(t.count)}</td><td>${fmtSec(t.totalSec)}</td><td>${fmtSec(t.media)}</td>
+        <td>${t.limite? fmtSec(t.limite)+(t.alertOnly?' (alerta)':'') : "—"}</td>
+        <td>${t.limite ? `<span class="pill ${t.excedentesCount>0?(t.alertOnly?'pill-orange':'pill-red'):'pill-green'}">${fmtNum(t.excedentesCount)} · ${fmtPct(t.excedentesPct)}</span>` : "—"}</td>
+      </tr>`).join("")}</tbody>
+    </table></div>
   </div>
 
   <div class="section-title"><span class="chev">›</span> Por setor</div>
@@ -1533,18 +1565,6 @@ function renderPause(){
     </table></div>
   </div>
   `;
-}
-function afterRenderPause(){
-  try{
-    const rows = getPauseFiltered();
-    const tipos = computePausasPorTipo(rows);
-    charts.pauseType = new Chart(document.getElementById('chPauseType'), {
-      type:'bar',
-      data:{labels: tipos.map(t=>t.tipo), datasets:[{data: tipos.map(t=>t.totalSec/60), backgroundColor:'#7063F0', borderRadius:6}]},
-      options:{...baseChartOpts(), indexAxis:'y',
-        plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>fmtSec(c.raw*60)}}}}
-    });
-  }catch(e){ console.error("afterRenderPause", e); }
 }
 /* ============================================================
    TELA: CONFIGURAÇÃO
@@ -1572,7 +1592,14 @@ function renderConfigScreen(){
   <div class="config-row" style="margin-top:8px;">
     <button class="btn btn-primary" id="btnLoadAll">Carregar / Atualizar todas as fontes</button>
     <button class="btn btn-ghost" id="btnSaveConfig">Salvar configuração</button>
+    <button class="btn btn-ghost" id="btnExportConfig">⬇ Exportar configuração (.json)</button>
+    <button class="btn btn-ghost" id="btnImportConfig">⬆ Importar configuração</button>
+    <input type="file" id="importConfigInput" accept=".json,application/json" style="display:none;">
   </div>
+  <p class="kpi-sub" style="margin-top:8px;">
+    Os links e mapeamentos ficam salvos automaticamente neste navegador. Como segurança extra (ex.: se limpar o cache ou trocar de computador),
+    exporte a configuração para um arquivo — e importe de volta quando precisar.
+  </p>
   `;
 }
 
@@ -1653,6 +1680,43 @@ function bindConfigEvents(){
   });
   document.getElementById('btnLoadAll')?.addEventListener('click', loadAllSheets);
   document.getElementById('btnSaveConfig')?.addEventListener('click', ()=>{ saveConfig(); alert('Configuração salva.'); });
+  document.getElementById('btnExportConfig')?.addEventListener('click', exportConfig);
+  document.getElementById('btnImportConfig')?.addEventListener('click', ()=>{
+    document.getElementById('importConfigInput').click();
+  });
+  document.getElementById('importConfigInput')?.addEventListener('change', (e)=>{
+    if(e.target.files && e.target.files[0]) importConfigFile(e.target.files[0]);
+  });
+}
+
+function exportConfig(){
+  const data = JSON.stringify({urls: state.urls, mapping: state.mapping}, null, 2);
+  const blob = new Blob([data], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'agility-insights-config.json';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+function importConfigFile(file){
+  const reader = new FileReader();
+  reader.onload = (e)=>{
+    try{
+      const parsed = JSON.parse(e.target.result);
+      state.urls = parsed.urls || {};
+      state.mapping = parsed.mapping || {};
+      saveConfig();
+      renderScreen();
+      updateSidebarStatus();
+      alert('Configuração importada com sucesso. Clique em "Carregar / Atualizar todas as fontes" para buscar os dados.');
+    }catch(err){
+      alert('Não foi possível ler esse arquivo como configuração válida.');
+    }
+  };
+  reader.readAsText(file);
 }
 function normalizeSheetIfMapped(key){ if(state.mapping[key]) normalizeSheet(key); }
 
@@ -1741,8 +1805,6 @@ renderScreen = function(){
   _origRenderScreen();
   if(currentScreen==="overview" && hasAnyData()) afterRenderOverview();
   if(currentScreen==="sector" && hasAnyData()) afterRenderSector();
-  if(currentScreen==="queue" && hasAnyData()) afterRenderQueue();
-  if(currentScreen==="pause" && hasAnyData()) afterRenderPause();
 };
 
 /* ============================================================
