@@ -139,6 +139,7 @@ input,select{font-family:inherit;}
 .grid-2{display:grid;grid-template-columns:1.3fr 1fr;gap:16px;}
 .grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;}
 .grid-auto{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px;}
+.grid-auto .card-wide{grid-column:1 / -1;}
 @media(max-width:1000px){.grid-2,.grid-3{grid-template-columns:1fr;}}
 
 .card{
@@ -1456,7 +1457,7 @@ function rankingTableCard(title, headers, rows, opts={}){
     }).join("");
     return `<tr><td style="font-weight:800;color:${i<3?'var(--purple)':'var(--text-muted)'};">${i+1}º</td>${cells}</tr>`;
   }).join("");
-  return `<div class="card"><div class="card-title">${title}</div>
+  return `<div class="card ${opts.wide ? "card-wide" : ""}"><div class="card-title">${title}</div>
     <div class="table-wrap"><table class="data-table">
       <thead><tr><th>#</th>${headers.map(h=>`<th>${h}</th>`).join("")}</tr></thead>
       <tbody>${body || `<tr><td colspan="${headers.length+1}" style="color:var(--text-muted)">${emptyText}</td></tr>`}</tbody>
@@ -1533,7 +1534,7 @@ function renderOverview(){
     const rows = months.map((m,i)=>{
       const x=monthMap.get(m);
       return [monthLabels[i], fmtNum(x.Receptivo), fmtNum(x.Ativo), fmtNum(x.Chat), `<b>${fmtNum(x.Receptivo+x.Ativo+x.Chat)}</b>`];
-    }).reverse();
+    });
     cards.push(simpleTableCard("Mix de canais por mês",["Mês","Receptivo","Ativo","Chat","Total"],rows));
   }
 
@@ -1547,9 +1548,9 @@ function renderOverview(){
     const rows=setorLabels.map(s=>{
       const vals=months.map(m=>(setorMonthMap.get(m)||new Map()).get(s)||0);
       const total=vals.reduce((a,b)=>a+b,0);
-      return [s,...vals.map(fmtNum),`<b>${fmtNum(total)}</b>`,total];
+      return [s,...vals.map(v=>fmtNum(v)),`<b>${fmtNum(total)}</b>`,total];
     }).sort((a,b)=>b[b.length-1]-a[a.length-1]).map(r=>r.slice(0,-1));
-    cards.push(rankingTableCard("Ranking de atendimentos por setor e mês",["Setor",...monthLabels,"Total"],rows,{boldFirst:true}));
+    cards.push(rankingTableCard("Ranking de atendimentos por setor e mês",["Setor",...monthLabels,"Total"],rows,{boldFirst:true,wide:true}));
   }
 
   if(hasCanal && setorLabels.length){
