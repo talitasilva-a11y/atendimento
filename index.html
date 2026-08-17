@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Agility Insights — Painel de Atendimento</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Inter:wght@400;500;600;700&display=swap');
 
@@ -1395,7 +1396,7 @@ function renderScreen(){
     return;
   }
 
-  if(currentScreen==="overview") content.innerHTML = renderOverview();
+  if(currentScreen==="overview"){ content.innerHTML = renderOverview(); afterRenderOverview(); }
   else if(currentScreen==="sector") content.innerHTML = renderSector();
   else if(currentScreen==="ranking") content.innerHTML = renderRanking();
   else if(currentScreen==="queue") content.innerHTML = renderQueue();
@@ -1576,9 +1577,10 @@ function renderOverview(){
   }
 
   if(hasSat && sat.dist.some(v=>v>0)){
-    const noteRows=sat.dist.map((v,i)=>({nota:i+1,count:v})).filter(r=>r.count>0).sort((a,b)=>b.count-a.count)
-      .map(r=>[String(r.nota),fmtNum(r.count)]);
-    cards.push(rankingTableCard("Ranking da distribuição das notas de satisfação",["Nota","Avaliações"],noteRows,{boldFirst:true}));
+    cards.push(`<div class="card card-wide">
+      <div class="card-title">Ranking da distribuição das notas de satisfação</div>
+      <div class="chart-box" style="height:280px;"><canvas id="chartNotaDist"></canvas></div>
+    </div>`);
   }
 
   return `
@@ -1588,7 +1590,59 @@ function renderOverview(){
   ${cards.length ? `<div class="section-title"><span class="chev">›</span> Rankings e comparativos</div><div class="grid-auto">${cards.join("")}</div>` : ""}
   `;
 }
-function afterRenderOverview(){}
+function afterRenderOverview(){
+  const canvas = document.getElementById('chartNotaDist');
+  if(!canvas) return;
+  try{
+    const sat = computeCsat(getSatFiltered());
+    const ranked = sat.dist
+      .map((v,i)=>({nota:i+1, count:v}))
+      .filter(r=>r.count>0)
+      .sort((a,b)=>b.count-a.count);
+    const labels = ranked.map(r=>`Nota ${r.nota}`);
+    const data = ranked.map(r=>r.count);
+    const colors = ranked.map(r=>{
+      if(r.nota>=4) return '#22C55E';
+      if(r.nota===3) return '#F5A623';
+      return '#EF4444';
+    });
+    charts.notaDist = new Chart(canvas.getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Avaliações',
+          data,
+          backgroundColor: colors,
+          borderRadius: 6,
+          maxBarThickness: 46
+        }]
+      },
+      options: {
+        ...baseChartOpts(),
+        indexAxis: 'y',
+        plugins: {
+          legend: {display:false},
+          tooltip: {
+            callbacks:{
+              label: (ctx)=>{
+                const total = data.reduce((a,b)=>a+b,0);
+                const pct = total ? (ctx.parsed.x*100/total).toFixed(1) : '0.0';
+                return `${fmtNum(ctx.parsed.x)} avaliações (${pct}%)`;
+              }
+            }
+          }
+        },
+        scales: {
+          x: { grid:{color:'#F0F0F5'}, ticks:{font:{size:10}, precision:0} },
+          y: { grid:{display:false}, ticks:{font:{size:11}} }
+        }
+      }
+    });
+  }catch(err){
+    showChartError('chartNotaDist', err);
+  }
+}
 /* ============================================================
    TELA: POR SETOR
    ============================================================ */
