@@ -1414,11 +1414,11 @@ function renderScreen(){
   }
 
   if(currentScreen==="overview"){ content.innerHTML = renderOverview(); afterRenderOverview(); }
-  else if(currentScreen==="sector") content.innerHTML = renderSector();
-  else if(currentScreen==="ranking") content.innerHTML = renderRanking();
-  else if(currentScreen==="queue") content.innerHTML = renderQueue();
-  else if(currentScreen==="chat") content.innerHTML = renderChat();
-  else if(currentScreen==="pause") content.innerHTML = renderPause();
+  else if(currentScreen==="sector"){ content.innerHTML = renderSector(); afterRenderSector(); }
+  else if(currentScreen==="ranking"){ content.innerHTML = renderRanking(); afterRenderRanking(); }
+  else if(currentScreen==="queue"){ content.innerHTML = renderQueue(); afterRenderQueue(); }
+  else if(currentScreen==="chat"){ content.innerHTML = renderChat(); afterRenderChat(); }
+  else if(currentScreen==="pause"){ content.innerHTML = renderPause(); afterRenderPause(); }
 
   bindScreenEvents();
 }
@@ -1464,6 +1464,129 @@ function badgeFor(v, goodThreshold){
 }
 const SETOR_PALETTE = ['#7063F0','#FF7029','#22C55E','#F5A623','#0EA5E9','#EF4444','#A855F7','#14B8A6','#F43F5E','#84CC16','#9CA3AF','#C97B4A'];
 function colorForIndex(i){ return SETOR_PALETTE[i % SETOR_PALETTE.length]; }
+
+/* ---------- Sistema de cores semânticas (derivado da paleta) ----------
+   Frias = resultado positivo | Quentes = resultado negativo/risco
+   Usado em gráficos e em destaques de tabela para indicar risco. */
+const RISK_GOOD = '#22C55E';   // verde  — dentro da meta
+const RISK_WARN = '#F5A623';   // dourado — zona de atenção
+const RISK_BAD  = '#EF4444';   // vermelho — crítico
+const RISK_BAD2 = '#FF7029';   // laranja — crítico (variação, usado em rankings de volume/transferência)
+
+/* Retorna a cor semântica de uma métrica.
+   invert=false: quanto maior o valor, melhor (ex.: CSAT, Nível de Serviço)
+   invert=true : quanto maior o valor, pior (ex.: Abandono, Rechamada) */
+function riskColor(v, goodThreshold, warnThreshold, invert=false){
+  if(!isFinite(v)) return '#C9CDD6';
+  let val = invert ? 1-v : v;
+  let good = invert ? 1-goodThreshold : goodThreshold;
+  let warn = invert ? 1-warnThreshold : warnThreshold;
+  if(val>=good) return RISK_GOOD;
+  if(val>=warn) return RISK_WARN;
+  return RISK_BAD;
+}
+function riskBadgeHtml(v, goodThreshold, warnThreshold, invert=false){
+  if(!isFinite(v)) return "";
+  const c = riskColor(v, goodThreshold, warnThreshold, invert);
+  const label = c===RISK_GOOD ? "bom" : c===RISK_WARN ? "atenção" : "crítico";
+  const bg = c===RISK_GOOD ? "#DFF7E6" : c===RISK_WARN ? "#FFF3D6" : "#FDE4E4";
+  const fg = c===RISK_GOOD ? "#15803D" : c===RISK_WARN ? "#8A5A00" : "#B91C1C";
+  return `<span class="kpi-badge" style="background:${bg};color:${fg};">${label}</span>`;
+}
+/* Escala de intensidade quente (para rankings sem meta definida, ex.: volume de transferências:
+   quanto maior o valor dentro do próprio ranking, mais "quente"/crítica a cor). */
+function heatColorForRank(value, maxValue){
+  if(!isFinite(value) || !maxValue) return RISK_WARN;
+  const t = Math.max(0, Math.min(1, value/maxValue));
+  // interpola de dourado (baixo) para vermelho (alto)
+  const from = [245,166,35], to=[239,68,68];
+  const rgb = from.map((c,i)=>Math.round(c + (to[i]-c)*t));
+  return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+}
+function chartCard(title, canvasId, opts={}){
+  const height = opts.height || 280;
+  return `<div class="card ${opts.wide!==false ? "card-wide" : ""}">
+    <div class="card-title">${title}</div>
+    <div style="height:${height}px;"><canvas id="${canvasId}"></canvas></div>
+  </div>`;
+}
+function horizontalBarChart(canvasId, labels, data, colors, opts={}){
+  const canvas = document.getElementById(canvasId);
+  if(!canvas) return null;
+  try{
+    return new Chart(canvas.getContext('2d'), {
+      type:'bar',
+      data:{ labels, datasets:[{ data, backgroundColor:colors, borderRadius:6, maxBarThickness:34 }] },
+      options:{
+        ...baseChartOpts(),
+        indexAxis:'y',
+        plugins:{
+          legend:{display:false},
+          tooltip:{ callbacks:{ label:(ctx)=> opts.tooltipFmt ? opts.tooltipFmt(ctx.parsed.x, ctx.dataIndex) : fmtNum(ctx.parsed.x) } }
+        },
+        scales:{
+          x:{ grid:{color:'#F0F0F5'}, ticks:{font:{size:10}, callback:opts.xTickFmt || undefined} },
+          y:{ grid:{display:false}, ticks:{font:{size:11}} }
+        }
+      }
+    });
+  }catch(err){ showChartError(canvasId, err); return null; }
+}
+function doughnutChart(canvasId, labels, data, colors, opts={}){
+  const canvas = document.getElementById(canvasId);
+  if(!canvas) return null;
+  try{
+    const total = data.reduce((a,b)=>a+b,0);
+    const centerTextPlugin = {
+      id:'centerText_'+canvasId,
+      afterDraw(chart){
+        if(!opts.centerText) return;
+        const {ctx, chartArea:{left,right,top,bottom}} = chart;
+        const cx=(left+right)/2, cy=(top+bottom)/2;
+        ctx.save();
+        ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.font='800 18px Sora, sans-serif'; ctx.fillStyle='#1C1F26';
+        ctx.fillText(opts.centerText(total), cx, cy-8);
+        ctx.font='500 11px Inter, sans-serif'; ctx.fillStyle='#6B7280';
+        ctx.fillText(opts.centerSub||'', cx, cy+12);
+        ctx.restore();
+      }
+    };
+    return new Chart(canvas.getContext('2d'), {
+      type:'doughnut',
+      data:{ labels, datasets:[{ data, backgroundColor:colors, borderWidth:2, borderColor:'#fff' }] },
+      options:{
+        responsive:true, maintainAspectRatio:false, cutout:'68%',
+        plugins:{
+          legend:{ position:'bottom', labels:{ font:{size:11}, boxWidth:12, padding:12 } },
+          tooltip:{ callbacks:{ label:(ctx)=>{
+            const pct = total ? (ctx.parsed*100/total).toFixed(1) : '0.0';
+            return `${ctx.label}: ${fmtNum(ctx.parsed)} (${pct}%)`;
+          } } }
+        }
+      },
+      plugins:[centerTextPlugin]
+    });
+  }catch(err){ showChartError(canvasId, err); return null; }
+}
+function lineChart(canvasId, labels, datasets, opts={}){
+  const canvas = document.getElementById(canvasId);
+  if(!canvas) return null;
+  try{
+    return new Chart(canvas.getContext('2d'), {
+      type:'line',
+      data:{ labels, datasets: datasets.map(d=>({
+        label:d.label, data:d.data, borderColor:d.color, backgroundColor:d.color+'22',
+        tension:0.35, fill:!!d.fill, pointRadius:3, pointBackgroundColor:d.color, yAxisID:d.yAxisID||'y'
+      })) },
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        plugins:{ legend:{ position:'bottom', labels:{font:{size:11}, boxWidth:12} } },
+        scales: opts.scales || { x:{grid:{display:false}, ticks:{font:{size:10}}}, y:{grid:{color:'#F0F0F5'}, ticks:{font:{size:10}}} }
+      }
+    });
+  }catch(err){ showChartError(canvasId, err); return null; }
+}
 
 function rankingTableCard(title, headers, rows, opts={}){
   const limit = opts.limit || 20;
@@ -1573,91 +1696,148 @@ function renderOverview(){
   }
 
   if(hasCanal && setorLabels.length){
-    const rows=setorLabels.map(s=>[s,fmtNum(setorMap.get(s))]);
-    cards.push(rankingTableCard("Ranking de volume por setor",["Setor","Atendimentos"],rows,{boldFirst:true}));
+    cards.push(chartCard("Ranking de volume por setor","chartVolumePorSetor"));
   }
 
   if(hasSat){
     const bySatSetor=groupBy(getSatFiltered(),r=>r.setor||"—");
-    const rows=Array.from(bySatSetor.entries()).map(([s,rs])=>{
-      const c=computeCsat(rs);
-      return [s,c.csat, c.total];
-    }).filter(r=>isFinite(r[1]) && r[2]>0).sort((a,b)=>b[1]-a[1])
-      .map(r=>[r[0],fmtPct(r[1]),fmtNum(r[2])]);
-    cards.push(rankingTableCard("Ranking de satisfação por setor",["Setor","CSAT","Avaliações"],rows,{boldFirst:true}));
+    const hasCsatSetorData = Array.from(bySatSetor.values()).some(rs=>computeCsat(rs).total>0);
+    if(hasCsatSetorData) cards.push(chartCard("Ranking de satisfação (CSAT) por setor","chartCsatPorSetor"));
   }
 
   if(hasCanal){
-    const channelRows=[["Receptivo",received.length],["Ativo",made.length],["Chat",chatRows.length]]
-      .filter(r=>r[1]>0).sort((a,b)=>b[1]-a[1]).map(r=>[r[0],fmtNum(r[1])]);
-    cards.push(rankingTableCard("Ranking de volume por canal",["Canal","Atendimentos"],channelRows,{boldFirst:true}));
+    const channelTotal = received.length+made.length+chatRows.length;
+    if(channelTotal>0) cards.push(chartCard("Ranking de volume por canal","chartCanalDonut",{wide:false}));
   }
 
   if(hasSat && sat.dist.some(v=>v>0)){
-    cards.push(`<div class="card card-wide">
-      <div class="card-title">Ranking da distribuição das notas de satisfação</div>
-      <div class="chart-box" style="height:280px;"><canvas id="chartNotaDist"></canvas></div>
-    </div>`);
+    cards.push(chartCard("Distribuição das notas de satisfação","chartNotaDist",{wide:false}));
+  }
+
+  const evolCards = [];
+  if(hasCanal && months.length>1){
+    evolCards.push(chartCard("Evolução mensal (Volume · CSAT · Nível de Serviço)","chartEvolucaoMensal",{wide:true,height:320}));
   }
 
   return `
   ${usingPublishedSnapshot ? `<div class="note-box" style="margin-bottom:18px;">📦 Dados publicados em ${publishedSnapshotAt ? new Date(publishedSnapshotAt).toLocaleString('pt-BR') : "data desconhecida"}.</div>` : ""}
   <div class="section-title"><span class="chev">›</span> Indicadores gerais</div>
   <div class="kpi-grid">${kpis.join("")}</div>
+  ${evolCards.length ? `<div class="section-title"><span class="chev">›</span> Evolução no período</div><div class="grid-auto">${evolCards.join("")}</div>` : ""}
   ${cards.length ? `<div class="section-title"><span class="chev">›</span> Rankings e comparativos</div><div class="grid-auto">${cards.join("")}</div>` : ""}
   `;
 }
 function afterRenderOverview(){
-  const canvas = document.getElementById('chartNotaDist');
-  if(!canvas) return;
-  try{
-    const sat = computeCsat(getSatFiltered());
-    const ranked = sat.dist
-      .map((v,i)=>({nota:i+1, count:v}))
-      .filter(r=>r.count>0)
-      .sort((a,b)=>b.count-a.count);
-    const labels = ranked.map(r=>`Nota ${r.nota}`);
-    const data = ranked.map(r=>r.count);
-    const colors = ranked.map(r=>{
-      if(r.nota>=4) return '#22C55E';
-      if(r.nota===3) return '#F5A623';
-      return '#EF4444';
-    });
-    charts.notaDist = new Chart(canvas.getContext('2d'), {
-      type: 'bar',
-      data: {
-        labels,
-        datasets: [{
-          label: 'Avaliações',
-          data,
-          backgroundColor: colors,
-          borderRadius: 6,
-          maxBarThickness: 46
-        }]
-      },
-      options: {
-        ...baseChartOpts(),
-        indexAxis: 'y',
-        plugins: {
-          legend: {display:false},
-          tooltip: {
-            callbacks:{
-              label: (ctx)=>{
-                const total = data.reduce((a,b)=>a+b,0);
-                const pct = total ? (ctx.parsed.x*100/total).toFixed(1) : '0.0';
-                return `${fmtNum(ctx.parsed.x)} avaliações (${pct}%)`;
-              }
-            }
-          }
-        },
-        scales: {
-          x: { grid:{color:'#F0F0F5'}, ticks:{font:{size:10}, precision:0} },
-          y: { grid:{display:false}, ticks:{font:{size:11}} }
+  // ---- Distribuição das notas de satisfação: ROSCA (donut) ----
+  if(document.getElementById('chartNotaDist')){
+    try{
+      const sat = computeCsat(getSatFiltered());
+      const ranked = sat.dist
+        .map((v,i)=>({nota:i+1, count:v}))
+        .filter(r=>r.count>0)
+        .sort((a,b)=>b.nota-a.nota); // 5 → 1, leitura natural de satisfação
+      const labels = ranked.map(r=>`Nota ${r.nota}`);
+      const data = ranked.map(r=>r.count);
+      const colors = ranked.map(r=>{
+        if(r.nota>=4) return RISK_GOOD;
+        if(r.nota===3) return RISK_WARN;
+        return RISK_BAD;
+      });
+      charts.notaDist = doughnutChart('chartNotaDist', labels, data, colors, {
+        centerText: (total)=>fmtNum(total),
+        centerSub: 'avaliações'
+      });
+    }catch(err){ showChartError('chartNotaDist', err); }
+  }
+
+  // ---- Ranking de volume por setor: BARRA HORIZONTAL (categórico) ----
+  if(document.getElementById('chartVolumePorSetor')){
+    try{
+      const received=getReceivedFiltered(), made=getMadeFiltered(), chatRows=getChatFiltered();
+      const setorMap = new Map();
+      [...received,...made,...chatRows].forEach(r=>{
+        const s = r.setor || "—";
+        setorMap.set(s, (setorMap.get(s)||0)+1);
+      });
+      const ranked = Array.from(setorMap.entries()).sort((a,b)=>b[1]-a[1]).slice(0,20);
+      const labels = ranked.map(r=>r[0]);
+      const data = ranked.map(r=>r[1]);
+      const colors = ranked.map((r,i)=>colorForIndex(i));
+      charts.volumePorSetor = horizontalBarChart('chartVolumePorSetor', labels, data, colors, {
+        tooltipFmt:(v)=>`${fmtNum(v)} atendimentos`
+      });
+    }catch(err){ showChartError('chartVolumePorSetor', err); }
+  }
+
+  // ---- Ranking de CSAT por setor: BARRA HORIZONTAL (semântica: verde/dourado/vermelho) ----
+  if(document.getElementById('chartCsatPorSetor')){
+    try{
+      const bySatSetor=groupBy(getSatFiltered(),r=>r.setor||"—");
+      const ranked = Array.from(bySatSetor.entries()).map(([s,rs])=>{
+        const c = computeCsat(rs);
+        return {setor:s, csat:c.csat, total:c.total};
+      }).filter(r=>isFinite(r.csat) && r.total>0).sort((a,b)=>b.csat-a.csat).slice(0,20);
+      const labels = ranked.map(r=>r.setor);
+      const data = ranked.map(r=>+(r.csat*100).toFixed(1));
+      const colors = ranked.map(r=>riskColor(r.csat, 0.85, 0.70));
+      charts.csatPorSetor = horizontalBarChart('chartCsatPorSetor', labels, data, colors, {
+        tooltipFmt:(v,i)=>`CSAT ${v}% · ${fmtNum(ranked[i].total)} avaliações`,
+        xTickFmt:(v)=>v+'%'
+      });
+    }catch(err){ showChartError('chartCsatPorSetor', err); }
+  }
+
+  // ---- Ranking de volume por canal: ROSCA (3 categorias) ----
+  if(document.getElementById('chartCanalDonut')){
+    try{
+      const received=getReceivedFiltered(), made=getMadeFiltered(), chatRows=getChatFiltered();
+      const raw = [["Receptivo",received.length,'#7063F0'],["Ativo",made.length,'#0EA5E9'],["Chat",chatRows.length,'#14B8A6']]
+        .filter(r=>r[1]>0);
+      charts.canalDonut = doughnutChart('chartCanalDonut', raw.map(r=>r[0]), raw.map(r=>r[1]), raw.map(r=>r[2]), {
+        centerText:(total)=>fmtNum(total),
+        centerSub:'atendimentos'
+      });
+    }catch(err){ showChartError('chartCanalDonut', err); }
+  }
+
+  // ---- Evolução mensal: LINHA (Volume · CSAT · Nível de Serviço) ----
+  if(document.getElementById('chartEvolucaoMensal')){
+    try{
+      const received=getReceivedFiltered(), made=getMadeFiltered(), chatRows=getChatFiltered();
+      const sats=getSatFiltered();
+      const monthSet = new Set();
+      [...received,...made,...chatRows].forEach(r=>{ if(r._date) monthSet.add(monthKeyISO(r._date)); });
+      const months = Array.from(monthSet).sort();
+      const labels = months.map(m=>{
+        const [y,mm]=m.split("-"); return MESES_PT[+mm-1]+"/"+y.slice(2);
+      });
+      const volumeData = months.map(m=>
+        received.filter(r=>r._date && monthKeyISO(r._date)===m).length +
+        made.filter(r=>r._date && monthKeyISO(r._date)===m).length +
+        chatRows.filter(r=>r._date && monthKeyISO(r._date)===m).length
+      );
+      const csatData = months.map(m=>{
+        const rs = sats.filter(r=>r._date && monthKeyISO(r._date)===m);
+        const c = computeCsat(rs);
+        return isFinite(c.csat) ? +(c.csat*100).toFixed(1) : null;
+      });
+      const nsData = months.map(m=>{
+        const rs = received.filter(r=>r._date && monthKeyISO(r._date)===m);
+        const rm = computeReceivedMetrics(rs);
+        return isFinite(rm.nivelServico) ? +rm.nivelServico.toFixed(1) : null;
+      });
+      charts.evolucaoMensal = lineChart('chartEvolucaoMensal', labels, [
+        {label:'Volume', data:volumeData, color:'#7063F0', yAxisID:'y'},
+        {label:'CSAT (%)', data:csatData, color:'#22C55E', yAxisID:'y1'},
+        {label:'Nível de Serviço (%)', data:nsData, color:'#0EA5E9', yAxisID:'y1'}
+      ], {
+        scales:{
+          x:{ grid:{display:false}, ticks:{font:{size:10}} },
+          y:{ position:'left', min:0, grid:{color:'#F0F0F5'}, ticks:{font:{size:10}}, title:{display:true,text:'Volume',font:{size:10}} },
+          y1:{ position:'right', grid:{display:false}, ticks:{font:{size:10}}, min:0, max:100, title:{display:true,text:'%',font:{size:10}} }
         }
-      }
-    });
-  }catch(err){
-    showChartError('chartNotaDist', err);
+      });
+    }catch(err){ showChartError('chartEvolucaoMensal', err); }
   }
 }
 /* ============================================================
@@ -1692,8 +1872,8 @@ function renderSector(){
   const columns=[
     {always:true,label:"Setor",render:r=>`<b>${esc(r.setor)}</b>`},
     {always:true,label:"Volume",render:r=>fmtNum(r.volume)},
-    {show:hasReceived,label:"% Abandono",render:r=>fmtPct(r.pctAbandono)},
-    {show:hasReceived,label:"Nível de Serviço",render:r=>fmtPct(r.nivelServico/100)},
+    {show:hasReceived,label:"% Abandono",render:r=>isFinite(r.pctAbandono)?`<span style="color:${riskColor(r.pctAbandono,0.08,0.15,true)};font-weight:700;">${fmtPct(r.pctAbandono)}</span>`:"—"},
+    {show:hasReceived,label:"Nível de Serviço",render:r=>isFinite(r.nivelServico)?`<span style="color:${riskColor(r.nivelServico/100,0.8,0.6)};font-weight:700;">${fmtPct(r.nivelServico/100)}</span>`:"—"},
     {show:hasReceived||hasMade,label:"TMA",render:r=>fmtSec(r.tmaComb)},
     {show:hasReceived,label:"TME",render:r=>fmtSec(r.tme)},
     {show:hasSat,label:"CSAT",render:r=>fmtPct(r.csat)},
@@ -1703,13 +1883,12 @@ function renderSector(){
 
   const cards=[];
   if(hasCanal){
-    const volumeRows=rows.filter(r=>r.volume>0).map(r=>[r.setor,fmtNum(r.volume)]);
-    cards.push(rankingTableCard("Ranking de volume de atendimentos por setor",["Setor","Atendimentos"],volumeRows,{boldFirst:true}));
+    const hasVolume = rows.some(r=>r.volume>0);
+    if(hasVolume) cards.push(chartCard("Ranking de volume de atendimentos por setor","chartVolSetorDetail"));
   }
   if(hasSat){
-    const csatRows=rows.filter(r=>isFinite(r.csat) && (bySatSetor.get(r.setor)||[]).length>0)
-      .sort((a,b)=>b.csat-a.csat).map(r=>[r.setor,fmtPct(r.csat),fmtNum((bySatSetor.get(r.setor)||[]).length)]);
-    cards.push(rankingTableCard("Ranking de CSAT por setor",["Setor","CSAT","Avaliações"],csatRows,{boldFirst:true}));
+    const hasCsat = rows.some(r=>isFinite(r.csat) && (bySatSetor.get(r.setor)||[]).length>0);
+    if(hasCsat) cards.push(chartCard("Ranking de CSAT por setor","chartCsatSetorDetail"));
   }
 
   return `
@@ -1720,7 +1899,41 @@ function renderSector(){
     <tbody>${rows.filter(r=>r.volume>0 || setores.length===1).map(r=>`<tr>${columns.map(c=>`<td>${c.render(r)}</td>`).join("")}</tr>`).join("")}</tbody>
   </table></div></div>`;
 }
-function afterRenderSector(){}
+function afterRenderSector(){
+  const received=getReceivedFiltered(), made=getMadeFiltered(), chatRows=getChatFiltered();
+  const byRecSetor=groupBy(received,r=>r.setor||"—");
+  const byMadeSetor=groupBy(made,r=>r.setor||"—");
+  const byChatSetor=groupBy(chatRows,r=>r.setor||"—");
+  const bySatSetor=groupBy(getSatFiltered(),r=>r.setor||"—");
+  const setores = state.filters.setor==="all" ? allSetores() : [state.filters.setor];
+
+  if(document.getElementById('chartVolSetorDetail')){
+    try{
+      const ranked = setores.map(s=>{
+        const volume=(byRecSetor.get(s)||[]).length+(byMadeSetor.get(s)||[]).length+(byChatSetor.get(s)||[]).length;
+        return {setor:s, volume};
+      }).filter(r=>r.volume>0).sort((a,b)=>b.volume-a.volume).slice(0,20);
+      const colors = ranked.map((r,i)=>colorForIndex(i));
+      charts.volSetorDetail = horizontalBarChart('chartVolSetorDetail', ranked.map(r=>r.setor), ranked.map(r=>r.volume), colors, {
+        tooltipFmt:(v)=>`${fmtNum(v)} atendimentos`
+      });
+    }catch(err){ showChartError('chartVolSetorDetail', err); }
+  }
+
+  if(document.getElementById('chartCsatSetorDetail')){
+    try{
+      const ranked = setores.map(s=>{
+        const c = computeCsat(bySatSetor.get(s)||[]);
+        return {setor:s, csat:c.csat, total:c.total};
+      }).filter(r=>isFinite(r.csat) && r.total>0).sort((a,b)=>b.csat-a.csat).slice(0,20);
+      const colors = ranked.map(r=>riskColor(r.csat, 0.85, 0.70));
+      charts.csatSetorDetail = horizontalBarChart('chartCsatSetorDetail', ranked.map(r=>r.setor), ranked.map(r=>+(r.csat*100).toFixed(1)), colors, {
+        tooltipFmt:(v,i)=>`CSAT ${v}% · ${fmtNum(ranked[i].total)} avaliações`,
+        xTickFmt:(v)=>v+'%'
+      });
+    }catch(err){ showChartError('chartCsatSetorDetail', err); }
+  }
+}
 /* ============================================================
    TELA: RANKING GAMIFICADO
    ============================================================ */
@@ -1733,16 +1946,35 @@ const RANK_TABS = [
 ];
 function renderRanking(){
   const list = buildAgentRanking(rankingCategory);
+  const top10 = list.filter(a=>a.score>=0).slice(0,10);
   return `
   <div class="ranking-tabs">
     ${RANK_TABS.map(t=>`<button class="rtab ${rankingCategory===t.key?'active':''}" data-rank-tab="${t.key}">${t.icon}${t.label}</button>`).join("")}
   </div>
   ${rankingCategory==="realizadas" ? `<p class="kpi-sub" style="margin-bottom:12px;">Considera apenas chamadas realizadas <b>atendidas</b> com duração <b>igual ou superior a 60s</b> (chamadas mais curtas costumam ser caixa postal).</p>` : ""}
+  ${top10.length ? `<div class="grid-auto" style="margin-bottom:16px;">${chartCard("Top 10 por Score","chartTopAgentes")}</div>` : ""}
   <div class="rank-list">
     ${list.length===0 ? `<div class="empty-state"><h3>Sem dados suficientes para este ranking</h3></div>` :
       list.slice(0,50).map((a,i)=>rankRow(a,i)).join("")}
   </div>
   `;
+}
+function afterRenderRanking(){
+  if(!document.getElementById('chartTopAgentes')) return;
+  try{
+    const list = buildAgentRanking(rankingCategory);
+    const top10 = list.filter(a=>a.score>=0).slice(0,10);
+    const isPct = rankingCategory==="satisfacao" || rankingCategory==="monitoria";
+    const labels = top10.map(a=>a.agente);
+    const data = top10.map(a=> isPct ? +a.score.toFixed(1) : a.score);
+    const colors = isPct
+      ? top10.map(a=>riskColor(a.score/100, 0.85, 0.70))
+      : top10.map((a,i)=>colorForIndex(i));
+    charts.topAgentes = horizontalBarChart('chartTopAgentes', labels, data, colors, {
+      tooltipFmt:(v)=> isPct ? `${v}%` : fmtNum(v),
+      xTickFmt: isPct ? (v)=>v+'%' : undefined
+    });
+  }catch(err){ showChartError('chartTopAgentes', err); }
 }
 function rankRow(a, i){
   const pos = i+1;
@@ -1804,6 +2036,14 @@ function renderQueue(){
     e <b>${fmtNum(mm.longas)}</b> chamadas feitas com duração ≥60s (contato real).
   </div>
 
+  ${rows.length ? `
+  <div class="section-title"><span class="chev">›</span> Indicadores de risco por setor</div>
+  <div class="grid-auto">
+    ${chartCard("Nível de Serviço por Setor","chartNivelServicoSetor")}
+    ${chartCard("% Abandono por Setor","chartAbandonoSetor")}
+    ${chartCard("% Rechamadas por Setor","chartRechamadaSetor")}
+  </div>` : ""}
+
   <div class="section-title"><span class="chev">›</span> SLA por setor</div>
   <div class="card">
     <div class="table-wrap"><table class="data-table" id="tblQueue">
@@ -1817,16 +2057,53 @@ function renderQueue(){
           <td>${fmtNum(r.entrantes)}</td>
           <td>${fmtPct(r.pctAtendidas20)}</td>
           <td>${fmtPct(r.pctAtendidas60)}</td>
-          <td>${fmtPct(r.pctAbandono)}</td>
+          <td><span style="color:${riskColor(r.pctAbandono,0.08,0.15,true)};font-weight:700;">${fmtPct(r.pctAbandono)}</span></td>
           <td>${fmtPct(r.pctAtendidas)}</td>
-          <td>${fmtPct(r.nivelServico/100)}</td>
+          <td><span style="color:${riskColor(r.nivelServico/100,0.8,0.6)};font-weight:700;">${fmtPct(r.nivelServico/100)}</span></td>
           <td>${fmtPct(r.ctee/100)}</td>
-          <td>${fmtPct(r.pctRechamadas)}</td>
+          <td><span style="color:${riskColor(r.pctRechamadas,0.05,0.1,true)};font-weight:700;">${fmtPct(r.pctRechamadas)}</span></td>
         </tr>`).join("")}
       </tbody>
     </table></div>
   </div>
   `;
+}
+function afterRenderQueue(){
+  const received = getReceivedFiltered();
+  const setores = allSetores();
+  const byRecSetor = groupBy(received, r=>r.setor||"—");
+  const rows = (state.filters.setor==="all"?setores:[state.filters.setor]).map(s=>{
+    const rm2 = computeReceivedMetrics(byRecSetor.get(s)||[]);
+    return {setor:s, ...rm2};
+  }).filter(r=>r.entrantes>0);
+
+  if(document.getElementById('chartNivelServicoSetor')){
+    try{
+      const ranked = rows.filter(r=>isFinite(r.nivelServico)).sort((a,b)=>b.nivelServico-a.nivelServico).slice(0,20);
+      const colors = ranked.map(r=>riskColor(r.nivelServico/100, 0.8, 0.6));
+      charts.nivelServicoSetor = horizontalBarChart('chartNivelServicoSetor', ranked.map(r=>r.setor), ranked.map(r=>+r.nivelServico.toFixed(1)), colors, {
+        tooltipFmt:(v)=>`Nível de Serviço ${v}%`, xTickFmt:(v)=>v+'%'
+      });
+    }catch(err){ showChartError('chartNivelServicoSetor', err); }
+  }
+  if(document.getElementById('chartAbandonoSetor')){
+    try{
+      const ranked = rows.filter(r=>isFinite(r.pctAbandono)).sort((a,b)=>b.pctAbandono-a.pctAbandono).slice(0,20);
+      const colors = ranked.map(r=>riskColor(r.pctAbandono, 0.08, 0.15, true));
+      charts.abandonoSetor = horizontalBarChart('chartAbandonoSetor', ranked.map(r=>r.setor), ranked.map(r=>+(r.pctAbandono*100).toFixed(1)), colors, {
+        tooltipFmt:(v)=>`Abandono ${v}%`, xTickFmt:(v)=>v+'%'
+      });
+    }catch(err){ showChartError('chartAbandonoSetor', err); }
+  }
+  if(document.getElementById('chartRechamadaSetor')){
+    try{
+      const ranked = rows.filter(r=>isFinite(r.pctRechamadas)).sort((a,b)=>b.pctRechamadas-a.pctRechamadas).slice(0,20);
+      const colors = ranked.map(r=>riskColor(r.pctRechamadas, 0.05, 0.10, true));
+      charts.rechamadaSetor = horizontalBarChart('chartRechamadaSetor', ranked.map(r=>r.setor), ranked.map(r=>+(r.pctRechamadas*100).toFixed(1)), colors, {
+        tooltipFmt:(v)=>`Rechamadas ${v}%`, xTickFmt:(v)=>v+'%'
+      });
+    }catch(err){ showChartError('chartRechamadaSetor', err); }
+  }
 }
 
 /* ============================================================
@@ -1869,18 +2146,33 @@ function renderChat(){
     ${kpiCard("Taxa de transferência", fmtPct(tr.totalChamadas? tr.totalTransferencias/tr.totalChamadas : NaN), "sobre o total de chamadas")}
   </div>
   <div class="grid-2" style="margin-top:14px;">
-    <div class="card">
-      <div class="card-title">Ranking de setores que mais transferem</div>
-      <div class="table-wrap"><table class="data-table"><thead><tr><th>#</th><th>Setor</th><th>Transferências</th></tr></thead>
-      <tbody>${tr.setorRank.length? tr.setorRank.slice(0,20).map((r,i)=>`<tr><td>${i+1}</td><td>${esc(r.setor)}</td><td>${fmtNum(r.count)}</td></tr>`).join("") : `<tr><td colspan="3" style="color:var(--text-muted)">Sem transferências no período/filtro</td></tr>`}</tbody></table></div>
-    </div>
-    <div class="card">
-      <div class="card-title">Ranking de agentes que mais transferem</div>
-      <div class="table-wrap"><table class="data-table"><thead><tr><th>#</th><th>Agente</th><th>Transferências</th></tr></thead>
-      <tbody>${tr.agenteRank.length? tr.agenteRank.slice(0,20).map((r,i)=>`<tr><td>${i+1}</td><td>${esc(r.agente)}</td><td>${fmtNum(r.count)}</td></tr>`).join("") : `<tr><td colspan="3" style="color:var(--text-muted)">Sem transferências no período/filtro</td></tr>`}</tbody></table></div>
-    </div>
+    ${tr.setorRank.length ? chartCard("Ranking de setores que mais transferem","chartTransferSetor",{wide:false,height:260}) : `<div class="card"><div class="card-title">Ranking de setores que mais transferem</div><p class="kpi-sub">Sem transferências no período/filtro</p></div>`}
+    ${tr.agenteRank.length ? chartCard("Ranking de agentes que mais transferem","chartTransferAgente",{wide:false,height:260}) : `<div class="card"><div class="card-title">Ranking de agentes que mais transferem</div><p class="kpi-sub">Sem transferências no período/filtro</p></div>`}
   </div>
   `;
+}
+function afterRenderChat(){
+  const tr = computeTransferSummary();
+  if(document.getElementById('chartTransferSetor')){
+    try{
+      const ranked = tr.setorRank.slice(0,15);
+      const max = Math.max(...ranked.map(r=>r.count),1);
+      const colors = ranked.map(r=>heatColorForRank(r.count,max));
+      charts.transferSetor = horizontalBarChart('chartTransferSetor', ranked.map(r=>r.setor), ranked.map(r=>r.count), colors, {
+        tooltipFmt:(v)=>`${fmtNum(v)} transferências`
+      });
+    }catch(err){ showChartError('chartTransferSetor', err); }
+  }
+  if(document.getElementById('chartTransferAgente')){
+    try{
+      const ranked = tr.agenteRank.slice(0,15);
+      const max = Math.max(...ranked.map(r=>r.count),1);
+      const colors = ranked.map(r=>heatColorForRank(r.count,max));
+      charts.transferAgente = horizontalBarChart('chartTransferAgente', ranked.map(r=>r.agente), ranked.map(r=>r.count), colors, {
+        tooltipFmt:(v)=>`${fmtNum(v)} transferências`
+      });
+    }catch(err){ showChartError('chartTransferAgente', err); }
+  }
 }
 
 /* ============================================================
@@ -1905,17 +2197,20 @@ function renderPause(){
   </div>
 
   <div class="section-title"><span class="chev">›</span> Por tipo de pausa</div>
-  <div class="card">
-    <div class="card-title">Detalhamento <small>limite considerado (segundos convertidos)</small></div>
-    <div class="table-wrap"><table class="data-table">
-      <thead><tr><th>Tipo</th><th>Registros</th><th>Total</th><th>Média</th><th>Limite</th><th>Excedentes</th></tr></thead>
-      <tbody>${tipos.map(t=>`<tr>
-        <td>${esc(t.tipo)}</td><td>${fmtNum(t.count)}</td><td>${fmtSec(t.totalSec)}</td><td>${t.alertaMedia ? `<span class="pill pill-orange">⚠️ ${fmtSec(t.media)}</span>` : fmtSec(t.media)}</td>
-        <td>${t.limite? fmtSec(t.limite)+(t.alertOnly?' (alerta média)':'') : "—"}</td>
-        <td>${t.alertOnly ? (t.alertaMedia ? `<span class="pill pill-orange">⚠️ Acima da média</span>` : `<span class="pill pill-green">✓ Dentro da média</span>`) : (t.limite ? `<span class="pill ${t.excedentesCount>0?'pill-red':'pill-green'}">${fmtNum(t.excedentesCount)} · ${fmtPct(t.excedentesPct)}</span>` : "—")}</td>
-      </tr>`).join("")}</tbody>
-    </table></div>
-  </div>
+  ${tipos.length ? `<div class="grid-2" style="margin-bottom:16px;">
+    ${chartCard("Distribuição do tempo em pausa por tipo","chartPausaTipoDonut",{wide:false,height:280})}
+    <div class="card">
+      <div class="card-title">Detalhamento <small>limite considerado (segundos convertidos)</small></div>
+      <div class="table-wrap"><table class="data-table">
+        <thead><tr><th>Tipo</th><th>Registros</th><th>Total</th><th>Média</th><th>Limite</th><th>Excedentes</th></tr></thead>
+        <tbody>${tipos.map(t=>`<tr>
+          <td>${esc(t.tipo)}</td><td>${fmtNum(t.count)}</td><td>${fmtSec(t.totalSec)}</td><td>${t.alertaMedia ? `<span class="pill pill-orange">⚠️ ${fmtSec(t.media)}</span>` : fmtSec(t.media)}</td>
+          <td>${t.limite? fmtSec(t.limite)+(t.alertOnly?' (alerta média)':'') : "—"}</td>
+          <td>${t.alertOnly ? (t.alertaMedia ? `<span class="pill pill-orange">⚠️ Acima da média</span>` : `<span class="pill pill-green">✓ Dentro da média</span>`) : (t.limite ? `<span class="pill ${t.excedentesCount>0?'pill-red':'pill-green'}">${fmtNum(t.excedentesCount)} · ${fmtPct(t.excedentesPct)}</span>` : "—")}</td>
+        </tr>`).join("")}</tbody>
+      </table></div>
+    </div>
+  </div>` : ""}
 
   <div class="section-title"><span class="chev">›</span> Por setor</div>
   <div class="card">
@@ -1923,7 +2218,7 @@ function renderPause(){
       <thead><tr><th>Setor</th><th>Agentes</th><th>Registros</th><th>Tempo total</th><th>Média por registro</th><th>% acima do limite</th></tr></thead>
       <tbody>${porSetor.map(s=>`<tr>
         <td><b>${esc(s.setor)}</b></td><td>${fmtNum(s.agentes)}</td><td>${fmtNum(s.count)}</td><td>${fmtSec(s.totalSec)}</td><td>${fmtSec(s.media)}</td>
-        <td>${fmtPct(s.excedentesPct)}</td>
+        <td><span style="color:${riskColor(s.excedentesPct,0.05,0.15,true)};font-weight:700;">${fmtPct(s.excedentesPct)}</span></td>
       </tr>`).join("")}</tbody>
     </table></div>
   </div>
@@ -1940,6 +2235,23 @@ function renderPause(){
     </table></div>
   </div>
   `;
+}
+function afterRenderPause(){
+  if(!document.getElementById('chartPausaTipoDonut')) return;
+  try{
+    const rows = getPauseFiltered();
+    const tipos = computePausasPorTipo(rows).slice().sort((a,b)=>b.totalSec-a.totalSec);
+    const top = tipos.slice(0,6);
+    const rest = tipos.slice(6);
+    const restTotal = rest.reduce((a,t)=>a+t.totalSec,0);
+    const labels = top.map(t=>t.tipo).concat(restTotal>0?['Outros']:[]);
+    const data = top.map(t=>t.totalSec).concat(restTotal>0?[restTotal]:[]);
+    const colors = labels.map((_,i)=>colorForIndex(i));
+    charts.pausaTipoDonut = doughnutChart('chartPausaTipoDonut', labels, data, colors, {
+      centerText:(t)=>fmtSec(t),
+      centerSub:'tempo total'
+    });
+  }catch(err){ showChartError('chartPausaTipoDonut', err); }
 }
 /* ============================================================
    TELA: CONFIGURAÇÃO
