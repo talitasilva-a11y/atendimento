@@ -1293,8 +1293,9 @@ function cancelLoading(){ loadGeneration++; hideLoading(); }
 /* ============================================================
    AUTENTICAÇÃO + DADOS VIA SUPABASE
    ============================================================ */
-const SUPABASE_URL = "https://SEU-PROJETO.supabase.co"; // sua Project URL (sem /rest/v1 no final)
-const SUPABASE_ANON_KEY = "COLE_AQUI_A_ANON_OU_PUBLISHABLE_KEY"; // NUNCA a service_role aqui
+const SUPABASE_URL = "https://emnolyehrgcowvprqpnq.supabase.co"; // sua Project URL (sem /rest/v1 no final)
+const SUPABASE_ANON_KEY = "keyeyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVtbm9seWVocmdjb3d2cHJxcG5xIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcyNDgzODUsImV4cCI6MjEwMjgyNDM4NX0.7YGpJ6jqSHGLJvVj2n2cY0qm0BFRR0V3ZZANUoiCjHw
+"; // NUNCA a service_role aqui
 
 const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
