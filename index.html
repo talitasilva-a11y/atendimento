@@ -330,9 +330,10 @@ table.data-table tbody tr:hover{background:#FAFAFD;}
 const PAUSE_TYPE_RULES = [
   {match:["particular"], limitSec:5*60, alertOnly:true},
   {match:["refei"], limitSec:60*60},
-  {match:["descanso"], limitSec:null, dependsOnSetor:true},
+  {match:["descanso"], limitSec:15*60},
   {match:["backoffice"], limitSec:4*3600},
   {match:["contato ativo"], limitSec:4*3600},
+  {match:["treinamento"], limitSec:2*3600},
   {match:["sa\u00fade","saude"], limitSec:60*60, alertOnly:true},
   {match:["feedback"], limitSec:60*60, alertOnly:true},
   {match:["reuni"], limitSec:60*60, alertOnly:true},
@@ -868,7 +869,7 @@ function riskColor(v, goodThreshold, warnThreshold, invert=false){
 function heatColorForRank(value, maxValue){
   if(!isFinite(value) || !maxValue) return RISK_WARN;
   const t = Math.max(0, Math.min(1, value/maxValue));
-  const from = [255,203,163], to=[153,64,12];
+  const from = [255,203,163], to=[255,112,41];
   const rgb = from.map((c,i)=>Math.round(c + (to[i]-c)*t));
   return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
 }
