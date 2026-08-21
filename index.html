@@ -1372,11 +1372,11 @@ async function loadFromCacheIfAny(){
   return any;
 }
 
-async function fetchPageWithRetry(table, from, to, retries){
+async function fetchPageKeysetWithRetry(table, afterId, pageSize, retries){
   let lastError = null;
   for(let attempt=0; attempt<=retries; attempt++){
     try{
-      const { data, error } = await supabaseClient.from(table).select("*").range(from, to);
+      const { data, error } = await supabaseClient.from(table).select("*").gt("id", afterId).order("id", {ascending:true}).limit(pageSize);
       if(error) throw error;
       return data || [];
     }catch(e){
@@ -1384,35 +1384,28 @@ async function fetchPageWithRetry(table, from, to, retries){
       if(attempt < retries) await new Promise(r=>setTimeout(r, 700*(attempt+1)));
     }
   }
-  console.warn("Página " + from + "-" + to + " de " + table + " falhou após tentativas:", lastError);
-  return null; // marca como falha, mas não derruba a tabela inteira
+  console.warn("Página após id=" + afterId + " de " + table + " falhou após tentativas:", lastError);
+  return null; // null indica falha real, mesmo após tentar de novo
 }
 
 async function fetchTableAll(table, myGen){
   const pageSize = 1000;
-  const CONCURRENCY = 4;
-  const { count, error: countErr } = await supabaseClient.from(table).select("*", { count: "exact", head: true });
-  if(countErr) throw countErr;
-  const total = count || 0;
-  if(total === 0) return { rows: [], failedPages: 0 };
-  const totalPages = Math.ceil(total / pageSize);
-  const all = new Array(total);
+  let all = [];
+  let lastId = 0;
   let failedPages = 0;
-  for(let p = 0; p < totalPages; p += CONCURRENCY){
-    if(myGen !== loadGeneration) return { rows: all.filter(Boolean), failedPages };
-    const batchPages = [];
-    for(let i = p; i < Math.min(p+CONCURRENCY, totalPages); i++) batchPages.push(i);
-    const results = await Promise.all(batchPages.map(async (page)=>{
-      const from = page*pageSize, to = from+pageSize-1;
-      const data = await fetchPageWithRetry(table, from, to, 2);
-      return { page, data };
-    }));
-    results.forEach(r=>{
-      if(r.data === null){ failedPages++; return; }
-      for(let i=0;i<r.data.length;i++) all[r.page*pageSize+i] = r.data[i];
-    });
+  while(true){
+    if(myGen !== loadGeneration) return { rows: all, failedPages };
+    const rows = await fetchPageKeysetWithRetry(table, lastId, pageSize, 2);
+    if(rows === null){
+      failedPages++;
+      break; // para aqui, mas mantém o que já buscou até agora
+    }
+    if(rows.length === 0) break; // acabou a tabela
+    all = all.concat(rows);
+    lastId = rows[rows.length-1].id;
+    if(rows.length < pageSize) break; // última página (veio incompleta)
   }
-  return { rows: all.filter(Boolean), failedPages };
+  return { rows: all, failedPages };
 }
 
 async function loadAllFromSupabase(useLoadingOverlay){
