@@ -1310,45 +1310,106 @@ const SUPABASE_TABLES = {
 
 let loadGeneration = 0;
 
-async function fetchTableAll(table, myGen){
-  const pageSize = 1000;
-  let from = 0;
-  let all = [];
-  while(true){
-    if(myGen !== loadGeneration) return all; // cancelado no meio da busca
-    const { data, error } = await supabaseClient.from(table).select("*").range(from, from+pageSize-1);
-    if(error) throw error;
-    all = all.concat(data);
-    if(!data || data.length < pageSize) break;
-    from += pageSize;
+/* ---------- CACHE LOCAL (IndexedDB) ----------
+   Guarda os dados já buscados no navegador de cada pessoa, para que, depois
+   da primeira vez, o painel abra na hora (mostrando o que já está salvo) e
+   atualize por baixo dos panos, em vez de esperar buscar tudo de novo. */
+const IDB_NAME = "agilityCache";
+const IDB_STORE = "tables";
+function idbOpen(){
+  return new Promise((resolve,reject)=>{
+    if(!window.indexedDB){ reject(new Error("IndexedDB indisponível")); return; }
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = ()=>{ req.result.createObjectStore(IDB_STORE); };
+    req.onsuccess = ()=> resolve(req.result);
+    req.onerror = ()=> reject(req.error);
+  });
+}
+async function idbGet(key){
+  try{
+    const db = await idbOpen();
+    return await new Promise((resolve,reject)=>{
+      const tx = db.transaction(IDB_STORE,"readonly");
+      const req = tx.objectStore(IDB_STORE).get(key);
+      req.onsuccess = ()=> resolve(req.result);
+      req.onerror = ()=> reject(req.error);
+    });
+  }catch(e){ return undefined; }
+}
+async function idbSet(key, value){
+  try{
+    const db = await idbOpen();
+    return await new Promise((resolve,reject)=>{
+      const tx = db.transaction(IDB_STORE,"readwrite");
+      tx.objectStore(IDB_STORE).put(value, key);
+      tx.oncomplete = ()=> resolve(true);
+      tx.onerror = ()=> reject(tx.error);
+    });
+  }catch(e){ return false; }
+}
+async function loadFromCacheIfAny(){
+  let any = false;
+  for(const key of Object.keys(SUPABASE_TABLES)){
+    const cached = await idbGet(key);
+    if(cached && Array.isArray(cached.rows) && cached.rows.length>0){
+      state.raw[key] = cached.rows;
+      state.mapping[key] = SUPABASE_TABLES[key].columns;
+      normalizeSheet(key);
+      any = true;
+    }
   }
-  return all;
+  return any;
 }
 
-async function loadAllFromSupabase(){
+async function fetchTableAll(table, myGen){
+  const pageSize = 1000;
+  const CONCURRENCY = 6; // várias páginas ao mesmo tempo, em vez de uma por vez
+  const { count, error: countErr } = await supabaseClient.from(table).select("*", { count: "exact", head: true });
+  if(countErr) throw countErr;
+  const total = count || 0;
+  if(total === 0) return [];
+  const totalPages = Math.ceil(total / pageSize);
+  const all = new Array(total);
+  for(let p = 0; p < totalPages; p += CONCURRENCY){
+    if(myGen !== loadGeneration) return all.filter(Boolean);
+    const batchPages = [];
+    for(let i = p; i < Math.min(p+CONCURRENCY, totalPages); i++) batchPages.push(i);
+    const results = await Promise.all(batchPages.map(async (page)=>{
+      const from = page*pageSize, to = from+pageSize-1;
+      const { data, error } = await supabaseClient.from(table).select("*").range(from, to);
+      if(error) throw error;
+      return { page, data: data || [] };
+    }));
+    results.forEach(r=>{ for(let i=0;i<r.data.length;i++) all[r.page*pageSize+i] = r.data[i]; });
+  }
+  return all.filter(Boolean);
+}
+
+async function loadAllFromSupabase(useLoadingOverlay){
   loadGeneration++;
   const myGen = loadGeneration;
-  showLoading("Carregando dados...");
+  if(useLoadingOverlay) showLoading("Carregando dados...");
   for(const key of Object.keys(SUPABASE_TABLES)){
     if(myGen !== loadGeneration) return;
     const cfg = SUPABASE_TABLES[key];
     try{
-      showLoading("Carregando " + (SHEETS[key]?.label || cfg.table) + "...");
+      if(useLoadingOverlay) showLoading("Carregando " + (SHEETS[key]?.label || cfg.table) + "...");
       const rows = await fetchTableAll(cfg.table, myGen);
       if(myGen !== loadGeneration) return;
       state.raw[key] = rows;
       state.mapping[key] = cfg.columns;
       normalizeSheet(key);
+      idbSet(key, { rows, ts: Date.now() });
     }catch(e){
       console.error("Erro ao buscar " + cfg.table + ":", e);
     }
   }
-  hideLoading();
+  if(useLoadingOverlay) hideLoading();
 }
 
 async function refreshAllData(){
   showSyncIndicator();
-  await loadAllFromSupabase();
+  await loadAllFromSupabase(false);
   normalizeAllSheets();
   renderScreen();
   updateSidebarStatus();
@@ -1391,11 +1452,31 @@ async function iniciarAppLogado(user){
   esconderLogin();
   const perfil = await carregarPerfilUsuario(user.id);
   adicionarBotaoSair(perfil);
-  await loadAllFromSupabase();
-  normalizeAllSheets();
-  renderNav();
-  goToScreen("overview");
-  updateSidebarStatus();
+
+  const hasCache = await loadFromCacheIfAny();
+
+  if(hasCache){
+    // Já tem dados salvos neste navegador: mostra na hora, sem tela de carregamento.
+    normalizeAllSheets();
+    renderNav();
+    goToScreen("overview");
+    updateSidebarStatus();
+    // Atualiza por baixo dos panos, sem travar a tela.
+    showSyncIndicator();
+    loadAllFromSupabase(false).then(()=>{
+      normalizeAllSheets();
+      renderScreen();
+      updateSidebarStatus();
+      hideSyncIndicator();
+    });
+  }else{
+    // Primeira vez neste navegador: precisa buscar tudo, mostra a tela de carregamento.
+    await loadAllFromSupabase(true);
+    normalizeAllSheets();
+    renderNav();
+    goToScreen("overview");
+    updateSidebarStatus();
+  }
 }
 
 function adicionarBotaoSair(perfil){
