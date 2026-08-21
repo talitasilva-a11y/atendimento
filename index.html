@@ -1288,6 +1288,17 @@ function updateSidebarStatus(){
   if(loaded.length===0){ dot.className='status-dot off'; text.textContent='Nenhum dado carregado'; }
   else if(loaded.length<Object.keys(SHEETS).length){ dot.className='status-dot warn'; text.textContent=`${loaded.length}/${Object.keys(SHEETS).length} fontes com dados`; }
   else { dot.className='status-dot'; text.textContent='Todas as fontes carregadas'; }
+  const problemas = window._ultimosProblemasCarregamento;
+  const footer = document.querySelector('.sidebar-footer');
+  const existingWarn = document.getElementById('loadWarnBox');
+  if(existingWarn) existingWarn.remove();
+  if(problemas && problemas.length && footer){
+    const box = document.createElement('div');
+    box.id = 'loadWarnBox';
+    box.style.cssText = 'background:#FFE9DD;color:#99400C;font-size:10.5px;padding:8px;border-radius:8px;margin-top:8px;line-height:1.5;';
+    box.innerHTML = '<b>⚠️ Carregamento incompleto:</b><br>' + problemas.map(p=>esc(p)).join('<br>');
+    footer.appendChild(box);
+  }
 }
 function cancelLoading(){ loadGeneration++; hideLoading(); }
 /* ============================================================
@@ -1361,50 +1372,80 @@ async function loadFromCacheIfAny(){
   return any;
 }
 
+async function fetchPageWithRetry(table, from, to, retries){
+  let lastError = null;
+  for(let attempt=0; attempt<=retries; attempt++){
+    try{
+      const { data, error } = await supabaseClient.from(table).select("*").range(from, to);
+      if(error) throw error;
+      return data || [];
+    }catch(e){
+      lastError = e;
+      if(attempt < retries) await new Promise(r=>setTimeout(r, 700*(attempt+1)));
+    }
+  }
+  console.warn("Página " + from + "-" + to + " de " + table + " falhou após tentativas:", lastError);
+  return null; // marca como falha, mas não derruba a tabela inteira
+}
+
 async function fetchTableAll(table, myGen){
   const pageSize = 1000;
-  const CONCURRENCY = 6; // várias páginas ao mesmo tempo, em vez de uma por vez
+  const CONCURRENCY = 4;
   const { count, error: countErr } = await supabaseClient.from(table).select("*", { count: "exact", head: true });
   if(countErr) throw countErr;
   const total = count || 0;
-  if(total === 0) return [];
+  if(total === 0) return { rows: [], failedPages: 0 };
   const totalPages = Math.ceil(total / pageSize);
   const all = new Array(total);
+  let failedPages = 0;
   for(let p = 0; p < totalPages; p += CONCURRENCY){
-    if(myGen !== loadGeneration) return all.filter(Boolean);
+    if(myGen !== loadGeneration) return { rows: all.filter(Boolean), failedPages };
     const batchPages = [];
     for(let i = p; i < Math.min(p+CONCURRENCY, totalPages); i++) batchPages.push(i);
     const results = await Promise.all(batchPages.map(async (page)=>{
       const from = page*pageSize, to = from+pageSize-1;
-      const { data, error } = await supabaseClient.from(table).select("*").range(from, to);
-      if(error) throw error;
-      return { page, data: data || [] };
+      const data = await fetchPageWithRetry(table, from, to, 2);
+      return { page, data };
     }));
-    results.forEach(r=>{ for(let i=0;i<r.data.length;i++) all[r.page*pageSize+i] = r.data[i]; });
+    results.forEach(r=>{
+      if(r.data === null){ failedPages++; return; }
+      for(let i=0;i<r.data.length;i++) all[r.page*pageSize+i] = r.data[i];
+    });
   }
-  return all.filter(Boolean);
+  return { rows: all.filter(Boolean), failedPages };
 }
 
 async function loadAllFromSupabase(useLoadingOverlay){
   loadGeneration++;
   const myGen = loadGeneration;
+  const problemas = [];
   if(useLoadingOverlay) showLoading("Carregando dados...");
   for(const key of Object.keys(SUPABASE_TABLES)){
     if(myGen !== loadGeneration) return;
     const cfg = SUPABASE_TABLES[key];
     try{
       if(useLoadingOverlay) showLoading("Carregando " + (SHEETS[key]?.label || cfg.table) + "...");
-      const rows = await fetchTableAll(cfg.table, myGen);
+      const { rows, failedPages } = await fetchTableAll(cfg.table, myGen);
       if(myGen !== loadGeneration) return;
       state.raw[key] = rows;
       state.mapping[key] = cfg.columns;
       normalizeSheet(key);
       idbSet(key, { rows, ts: Date.now() });
+      if(failedPages > 0){
+        problemas.push((SHEETS[key]?.label || cfg.table) + ": " + failedPages + " parte(s) não carregou(aram), tente 'Atualizar dados'.");
+      }
     }catch(e){
       console.error("Erro ao buscar " + cfg.table + ":", e);
+      problemas.push((SHEETS[key]?.label || cfg.table) + ": " + (e.message || "erro desconhecido"));
     }
   }
   if(useLoadingOverlay) hideLoading();
+  if(problemas.length){
+    console.warn("Fontes com problema no carregamento:", problemas);
+    window._ultimosProblemasCarregamento = problemas;
+  }else{
+    window._ultimosProblemasCarregamento = null;
+  }
 }
 
 async function refreshAllData(){
