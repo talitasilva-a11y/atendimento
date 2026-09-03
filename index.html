@@ -735,7 +735,7 @@ function allAgentes(){
 function hasAnyData(){ return Object.keys(SHEETS).some(k=> (state.rows[k]||[]).length>0); }
 function hasSheetData(key){ return (state.rows[key]||[]).length>0; }
 function buildAgentRanking(category){
-  const RANKING_MIN_AVALIACOES = 5; // mínimo de respostas para entrar no ranking de Satisfação/Resolução/NPS
+  const RANKING_MIN_AVALIACOES = 10; // exige MAIS de 10 respostas (>10) para entrar no ranking de Satisfação/Resolução/NPS
   const received = getReceivedFiltered();
   const made = getMadeFiltered();
   const chatRows = getChatFiltered();
@@ -782,9 +782,9 @@ function buildAgentRanking(category){
       notaMonMedia, score};
   });
   return list.filter(a=>{
-    if(category==="satisfacao") return a.score>=0 && a.satisfacaoTotal>=RANKING_MIN_AVALIACOES;
-    if(category==="resolucao") return a.score>=0 && a.resolucaoTotal>=RANKING_MIN_AVALIACOES;
-    if(category==="nps") return a.score>=0 && a.npsTotal>=RANKING_MIN_AVALIACOES;
+    if(category==="satisfacao") return a.score>=0 && a.satisfacaoTotal>RANKING_MIN_AVALIACOES;
+    if(category==="resolucao") return a.score>=0 && a.resolucaoTotal>RANKING_MIN_AVALIACOES;
+    if(category==="nps") return a.score>=0 && a.npsTotal>RANKING_MIN_AVALIACOES;
     return a.score>=0 || category==="geral";
   }).sort((a,b)=>b.score-a.score);
 }
@@ -1224,7 +1224,7 @@ function renderRanking(){
   const list = buildAgentRanking(rankingCategory);
   return `<div class="ranking-tabs">${RANK_TABS.map(t=>`<button class="rtab ${rankingCategory===t.key?'active':''}" data-rank-tab="${t.key}">${t.icon}${t.label}</button>`).join("")}</div>
   ${rankingCategory==="realizadas" ? `<p class="kpi-sub" style="margin-bottom:12px;">Considera apenas chamadas realizadas <b>atendidas</b> com duração <b>igual ou superior a 60s</b>.</p>` : ""}
-  ${["satisfacao","resolucao","nps"].includes(rankingCategory) ? `<p class="kpi-sub" style="margin-bottom:12px;">Só entram no ranking agentes com pelo menos <b>5 avaliações</b> no período — evita que 1 avaliação isolada (ex.: agente que já saiu, ou muito recente) distorça o resultado.</p>` : ""}
+  ${["satisfacao","resolucao","nps"].includes(rankingCategory) ? `<p class="kpi-sub" style="margin-bottom:12px;">Só entram no ranking agentes com <b>mais de 10 avaliações</b> no período — evita que uma amostra pequena (ex.: agente que já saiu, ou muito recente) distorça o resultado.</p>` : ""}
   <div class="rank-list">${list.length===0 ? `<div class="empty-state"><h3>Sem dados suficientes para este ranking</h3></div>` : list.slice(0,50).map((a,i)=>rankRow(a,i)).join("")}</div>`;
 }
 function afterRenderRanking(){}
