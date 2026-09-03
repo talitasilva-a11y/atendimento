@@ -735,6 +735,7 @@ function allAgentes(){
 function hasAnyData(){ return Object.keys(SHEETS).some(k=> (state.rows[k]||[]).length>0); }
 function hasSheetData(key){ return (state.rows[key]||[]).length>0; }
 function buildAgentRanking(category){
+  const RANKING_MIN_AVALIACOES = 5; // mínimo de respostas para entrar no ranking de Satisfação/Resolução/NPS
   const received = getReceivedFiltered();
   const made = getMadeFiltered();
   const chatRows = getChatFiltered();
@@ -774,9 +775,18 @@ function buildAgentRanking(category){
     else if(category==="resolucao") score = isFinite(resolucaoPct)? resolucaoPct*100 : -1;
     else if(category==="nps") score = isFinite(npsMedia)? npsMedia/10*100 : -1;
     else if(category==="monitoria") score = isFinite(notaMonMedia)? notaMonMedia*100 : -1;
-    return {agente, total, recebidas:recList.length, realizadas:madeValidList.length, chat:chatList.length, satisfacaoMedia, resolucaoPct, npsMedia, notaMonMedia, score};
+    return {agente, total, recebidas:recList.length, realizadas:madeValidList.length, chat:chatList.length,
+      satisfacaoMedia, satisfacaoTotal:satList.length,
+      resolucaoPct, resolucaoTotal:resList.length,
+      npsMedia, npsTotal:npsList.length,
+      notaMonMedia, score};
   });
-  return list.filter(a=>a.score>=0 || category==="geral").sort((a,b)=>b.score-a.score);
+  return list.filter(a=>{
+    if(category==="satisfacao") return a.score>=0 && a.satisfacaoTotal>=RANKING_MIN_AVALIACOES;
+    if(category==="resolucao") return a.score>=0 && a.resolucaoTotal>=RANKING_MIN_AVALIACOES;
+    if(category==="nps") return a.score>=0 && a.npsTotal>=RANKING_MIN_AVALIACOES;
+    return a.score>=0 || category==="geral";
+  }).sort((a,b)=>b.score-a.score);
 }
 const ICONS = {
   overview: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>`,
@@ -1214,6 +1224,7 @@ function renderRanking(){
   const list = buildAgentRanking(rankingCategory);
   return `<div class="ranking-tabs">${RANK_TABS.map(t=>`<button class="rtab ${rankingCategory===t.key?'active':''}" data-rank-tab="${t.key}">${t.icon}${t.label}</button>`).join("")}</div>
   ${rankingCategory==="realizadas" ? `<p class="kpi-sub" style="margin-bottom:12px;">Considera apenas chamadas realizadas <b>atendidas</b> com duração <b>igual ou superior a 60s</b>.</p>` : ""}
+  ${["satisfacao","resolucao","nps"].includes(rankingCategory) ? `<p class="kpi-sub" style="margin-bottom:12px;">Só entram no ranking agentes com pelo menos <b>5 avaliações</b> no período — evita que 1 avaliação isolada (ex.: agente que já saiu, ou muito recente) distorça o resultado.</p>` : ""}
   <div class="rank-list">${list.length===0 ? `<div class="empty-state"><h3>Sem dados suficientes para este ranking</h3></div>` : list.slice(0,50).map((a,i)=>rankRow(a,i)).join("")}</div>`;
 }
 function afterRenderRanking(){}
@@ -1223,11 +1234,15 @@ function rankRow(a, i){
   let scoreDisplay;
   if(["satisfacao","resolucao","nps","monitoria"].includes(rankingCategory)) scoreDisplay = isFinite(a.score)&&a.score>=0 ? a.score.toFixed(1)+"%" : "—";
   else scoreDisplay = fmtNum(a.score);
+  let countLabel = "";
+  if(rankingCategory==="satisfacao") countLabel = `${fmtNum(a.satisfacaoTotal)} avaliações`;
+  else if(rankingCategory==="resolucao") countLabel = `${fmtNum(a.resolucaoTotal)} respostas`;
+  else if(rankingCategory==="nps") countLabel = `${fmtNum(a.npsTotal)} respostas`;
   const badgeLabel = pos<=3 ? `${pos}º Colocado` : `${pos}º lugar`;
   return `<div class="rank-row ${cls}"><div class="rank-pos">${pos}</div><div class="rank-avatar">${initials}</div>
     <div class="rank-info"><div class="rank-name">${esc(a.agente)}</div>
     <div class="rank-sub">${fmtNum(a.recebidas)} recebidas · ${fmtNum(a.realizadas)} realizadas (≥60s) · ${fmtNum(a.chat)} chat · Satisfação ${fmtPct(isFinite(a.satisfacaoMedia)?a.satisfacaoMedia/10:NaN)} · Resolução ${fmtPct(a.resolucaoPct)} · NPS ${fmtPct(isFinite(a.npsMedia)?a.npsMedia/10:NaN)} · Monitoria ${fmtPct(a.notaMonMedia)}</div></div>
-    <div class="rank-score"><div class="val">${scoreDisplay}</div><div class="rank-badge">${badgeLabel}</div></div></div>`;
+    <div class="rank-score"><div class="val">${scoreDisplay}</div>${countLabel?`<div class="kpi-sub" style="margin-top:1px;">${countLabel}</div>`:""}<div class="rank-badge">${badgeLabel}</div></div></div>`;
 }
 function renderQueue(){
   const received = getReceivedFiltered(); const made = getMadeFiltered();
