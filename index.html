@@ -367,8 +367,8 @@ const SHEETS = {
   chat: { label: "Chat (registros)", fields: [ {key:"data"},{key:"agente"},{key:"setor"} ] },
   chatPerf: { label: "Performance Chat", fields: [
     {key:"data"},{key:"agente"},{key:"setor"},{key:"conversasSat"},{key:"satisfacaoMedia"},{key:"total"},{key:"tma"},{key:"tmeResp"} ] },
-  satisfaction: { label: "Satisfação (CSAT)", fields: [
-    {key:"data"},{key:"agente"},{key:"setor"},{key:"canal"},{key:"nota"} ] },
+  satisfaction: { label: "Satisfação", fields: [
+    {key:"data"},{key:"agente"},{key:"setor"},{key:"canal"},{key:"nota"},{key:"resolucao"},{key:"nps"} ] },
   monitoring: { label: "Monitoria", fields: [
     {key:"data"},{key:"agente"},{key:"setor"},{key:"nota"},{key:"canal"} ] },
   pause: { label: "Pausa", fields: [
@@ -440,12 +440,19 @@ function normalizeFraction(v){
   if(!isFinite(v)) return v;
   return v>1 ? v/100 : v;
 }
+function normalizeResolucao(v){
+  const s = (v||"").toString().trim().toLowerCase();
+  if(!s) return null;
+  if(s.startsWith("s")) return "Sim";
+  if(s.startsWith("n")) return "Não";
+  return null;
+}
 const SHEET_ENRICHERS = {
   received: r=>{ r._date=parseDateFlexible(r.data); r._status=normalizeStatus(r.status); r._esp=toNumber(r.tempoEspera); r._dur=toNumber(r.tempoLigacao); },
   made: r=>{ r._date=parseDateFlexible(r.data); r._status=normalizeStatus(r.status); r._dur=toNumber(r.tempoLigacao); },
   chat: r=>{ r._date=parseDateFlexible(r.data); },
   chatPerf: r=>{ r._date=parseDateFlexible(r.data); r._total=toNumber(r.total); r._tma=durationToSeconds(r.tma); r._tmeResp=durationToSeconds(r.tmeResp); r._satMedia=toNumber(r.satisfacaoMedia); r._conversasSat=toNumber(r.conversasSat); },
-  satisfaction: r=>{ r._date=parseDateFlexible(r.data); r._nota=toNumber(r.nota); },
+  satisfaction: r=>{ r._date=parseDateFlexible(r.data); r._nota=toNumber(r.nota); r._resolucao=normalizeResolucao(r.resolucao); r._nps=toNumber(r.nps); },
   monitoring: r=>{ r._date=parseDateFlexible(r.data); r._nota=normalizeFraction(toNumber(r.nota)); },
   pause: r=>{ r._date=parseDateFlexible(r.data); r._sec=toNumber(r.duracao); },
 };
@@ -619,7 +626,7 @@ function computeChatPerfBySetor(){
   return setores.map(s=>{
     const total = (byChatSetor.get(s)||[]).length;
     const perf = computeChatPerfMetrics(byPerfSetor.get(s)||[]);
-    const csat = computeCsat(bySatSetor.get(s)||[]).csat;
+    const csat = computeSatisfacao(bySatSetor.get(s)||[]).pct;
     return {setor:s, total, tmeResp:perf.tmeResp, tma:perf.tma, csat};
   }).filter(r=>r.total>0 || isFinite(r.tmeResp) || isFinite(r.tma) || isFinite(r.csat));
 }
@@ -627,14 +634,31 @@ function getSatFiltered(){
   const rows = state.rows.satisfaction||[];
   return rows.filter(r=> inPeriod(r._date) && passesFilters(r) && satCanalMatches(r.canal));
 }
-function computeCsat(rows){
+function computeSatisfacao(rows){
   const valid = rows.filter(r=>isFinite(r._nota));
   const total = valid.length;
-  const promotoras = valid.filter(r=>r._nota>=4).length;
-  const csat = total? promotoras/total : NaN;
   const media = avg(valid.map(r=>r._nota));
-  const dist = [1,2,3,4,5].map(n=>valid.filter(r=>r._nota===n).length);
-  return {total, csat, media, dist};
+  const pct = isFinite(media) ? media/10 : NaN; // média (0-10) em fração, comparável à meta de 90%
+  return {total, media, pct};
+}
+function computeResolucao(rows){
+  const valid = rows.filter(r=>r._resolucao==="Sim"||r._resolucao==="Não");
+  const total = valid.length;
+  const pct = total ? valid.filter(r=>r._resolucao==="Sim").length/total : NaN;
+  return {total, pct};
+}
+function computeNps(rows){
+  const valid = rows.filter(r=>isFinite(r._nps));
+  const total = valid.length;
+  const media = avg(valid.map(r=>r._nps));
+  const pct = isFinite(media) ? media/10 : NaN;
+  return {total, media, pct};
+}
+function notaDistribution(rows, maxScale=10){
+  const valid = rows.filter(r=>isFinite(r._nota));
+  const dist = new Array(maxScale).fill(0);
+  valid.forEach(r=>{ const n = Math.round(r._nota); if(n>=1 && n<=maxScale) dist[n-1]++; });
+  return dist;
 }
 function getMonFiltered(){
   const rows = state.rows.monitoring||[];
@@ -732,18 +756,25 @@ function buildAgentRanking(category){
     const madeList = byMade.get(agente)||[];
     const chatList = byChat.get(agente)||[];
     const madeValidList = madeList.filter(r=>r._status==="Atendida" && isFinite(r._dur) && r._dur>=60);
-    const sList = (bySat.get(agente)||[]).filter(r=>isFinite(r._nota));
+    const satAllList = bySat.get(agente)||[];
+    const satList = satAllList.filter(r=>isFinite(r._nota));
+    const resList = satAllList.filter(r=>r._resolucao==="Sim"||r._resolucao==="Não");
+    const npsList = satAllList.filter(r=>isFinite(r._nps));
     const mList = (byMon.get(agente)||[]).filter(r=>isFinite(r._nota));
     const total = recList.length + madeValidList.length + chatList.length;
-    const csat = sList.length ? sList.filter(r=>r._nota>=4).length/sList.length : NaN;
+    const satisfacaoMedia = satList.length ? avg(satList.map(r=>r._nota)) : NaN;
+    const resolucaoPct = resList.length ? resList.filter(r=>r._resolucao==="Sim").length/resList.length : NaN;
+    const npsMedia = npsList.length ? avg(npsList.map(r=>r._nps)) : NaN;
     const notaMonMedia = mList.length ? avg(mList.map(r=>r._nota)) : NaN;
     let score;
     if(category==="geral") score = total;
     else if(category==="recebidas") score = recList.length;
     else if(category==="realizadas") score = madeValidList.length;
-    else if(category==="satisfacao") score = isFinite(csat)? csat*100 : -1;
+    else if(category==="satisfacao") score = isFinite(satisfacaoMedia)? satisfacaoMedia/10*100 : -1;
+    else if(category==="resolucao") score = isFinite(resolucaoPct)? resolucaoPct*100 : -1;
+    else if(category==="nps") score = isFinite(npsMedia)? npsMedia/10*100 : -1;
     else if(category==="monitoria") score = isFinite(notaMonMedia)? notaMonMedia*100 : -1;
-    return {agente, total, recebidas:recList.length, realizadas:madeValidList.length, chat:chatList.length, csat, notaMonMedia, score};
+    return {agente, total, recebidas:recList.length, realizadas:madeValidList.length, chat:chatList.length, satisfacaoMedia, resolucaoPct, npsMedia, notaMonMedia, score};
   });
   return list.filter(a=>a.score>=0 || category==="geral").sort((a,b)=>b.score-a.score);
 }
@@ -891,6 +922,21 @@ function horizontalBarChart(canvasId, labels, data, colors, opts={}){
     });
   }catch(err){ showChartError(canvasId, err); return null; }
 }
+function groupedHorizontalBarChart(canvasId, labels, datasets, opts={}){
+  const canvas = document.getElementById(canvasId);
+  if(!canvas) return null;
+  try{
+    return new Chart(canvas.getContext('2d'), {
+      type:'bar',
+      data:{ labels, datasets: datasets.map(d=>({ label:d.label, data:d.data, backgroundColor:d.color, borderRadius:6, maxBarThickness:16 })) },
+      options:{ ...baseChartOpts(), indexAxis:'y',
+        plugins:{ legend:{ display:true, position:'bottom', labels:{font:{size:11}, boxWidth:12} },
+          tooltip:{ callbacks:{ label:(ctx)=> `${ctx.dataset.label}: ${opts.tooltipFmt ? opts.tooltipFmt(ctx.parsed.x) : fmtNum(ctx.parsed.x)}` } } },
+        scales:{ x:{ grid:{color:'#F0F0F5'}, ticks:{font:{size:10}} }, y:{ grid:{display:false}, ticks:{font:{size:11}} } }
+      }
+    });
+  }catch(err){ showChartError(canvasId, err); return null; }
+}
 function doughnutChart(canvasId, labels, data, colors, opts={}){
   const canvas = document.getElementById(canvasId);
   if(!canvas) return null;
@@ -950,7 +996,10 @@ function renderOverview(){
   const chatRows = getChatFiltered();
   const rm = computeReceivedMetrics(received);
   const mm = computeMadeMetrics(made);
-  const sat = computeCsat(getSatFiltered());
+  const sats = getSatFiltered();
+  const satisfacao = computeSatisfacao(sats);
+  const resolucao = computeResolucao(sats);
+  const nps = computeNps(sats);
   const mon = computeMonitoria(getMonFiltered());
   const hasReceived = hasSheetData('received');
   const hasMade = hasSheetData('made');
@@ -963,7 +1012,9 @@ function renderOverview(){
     kpiCard("Volume total de atendimentos", fmtNum(volumeTotal), `Receptivo ${fmtNum(received.length)} · Ativo ${fmtNum(made.length)} · Chat ${fmtNum(chatRows.length)}`),
     hasReceived ? kpiCard("Nível de serviço", fmtPct(rm.nivelServico/100), "chamadas atendidas em até 20 segundos * 100 / (chamadas atendidas na fila + chamadas abandonadas na fila)", badgeFor(rm.nivelServico/100,0.8)) : "",
     hasReceived ? kpiCard("Taxa de abandono", fmtPct(rm.pctAbandono), "não atendidas / entrantes (receptivo)", badgeFor(1-rm.pctAbandono,0.92)) : "",
-    hasSat ? kpiCard("CSAT", fmtPct(sat.csat), `${fmtNum(sat.total)} avaliações · nota média ${fmtNum(sat.media,2)}`, badgeFor(sat.csat,0.85)) : "",
+    satisfacao.total>0 ? kpiCard("Satisfação", fmtPct(satisfacao.pct), `${fmtNum(satisfacao.total)} avaliações · nota média ${fmtNum(satisfacao.media,1)}/10 · meta 90%`, badgeFor(satisfacao.pct,0.90)) : "",
+    resolucao.total>0 ? kpiCard("Resolução", fmtPct(resolucao.pct), `${fmtNum(resolucao.total)} respostas · meta 90%`, badgeFor(resolucao.pct,0.90)) : "",
+    nps.total>0 ? kpiCard("NPS", fmtPct(nps.pct), `${fmtNum(nps.total)} respostas · nota média ${fmtNum(nps.media,1)}/10 · meta 90%`, badgeFor(nps.pct,0.90)) : "",
     hasMon ? kpiCard("Nota de monitoria", fmtPct(mon.media), `${fmtNum(mon.total)} monitorias · ${fmtPct(mon.pctMax)} nota máxima`, badgeFor(mon.media,0.85)) : "",
     (hasReceived||hasMade) ? kpiCard("TMA", fmtSec(avg([rm.tma, mm.tma].filter(isFinite))), "receptivo + ativo") : "",
     hasReceived ? kpiCard("TME", fmtSec(rm.tme), "tempo médio de espera (receptivo)") : "",
@@ -1005,13 +1056,13 @@ function renderOverview(){
   if(hasCanal && setorLabels.length){ cards.push(chartCard("Ranking de volume por setor","chartVolumePorSetor")); }
   if(hasSat){
     const bySatSetor=groupBy(getSatFiltered(),r=>r.setor||"—");
-    const hasCsatSetorData = Array.from(bySatSetor.values()).some(rs=>computeCsat(rs).total>0);
-    if(hasCsatSetorData) cards.push(chartCard("Ranking de satisfação (CSAT) por setor","chartCsatPorSetor"));
+    const hasSatisfacaoSetorData = Array.from(bySatSetor.values()).some(rs=>computeSatisfacao(rs).total>0);
+    if(hasSatisfacaoSetorData) cards.push(chartCard("Ranking de satisfação por setor","chartCsatPorSetor"));
   }
   if(hasCanal){ const channelTotal = received.length+made.length+chatRows.length; if(channelTotal>0) cards.push(chartCard("Ranking de volume por canal","chartCanalDonut",{wide:false})); }
-  if(hasSat && sat.dist.some(v=>v>0)){ cards.push(chartCard("Distribuição das notas de satisfação","chartNotaDist",{wide:false})); }
+  if(satisfacao.total>0){ cards.push(chartCard("Distribuição das notas de satisfação","chartNotaDist",{wide:false})); }
   const evolCards = [];
-  if(hasCanal && months.length>1){ evolCards.push(chartCard("Evolução mensal (Volume · CSAT · Nível de Serviço)","chartEvolucaoMensal",{wide:true,height:320})); }
+  if(hasCanal && months.length>1){ evolCards.push(chartCard("Evolução mensal (Volume · Satisfação · Nível de Serviço)","chartEvolucaoMensal",{wide:true,height:320})); }
   return `<div class="section-title"><span class="chev">›</span> Indicadores gerais</div><div class="kpi-grid">${kpis.join("")}</div>
   ${evolCards.length ? `<div class="section-title"><span class="chev">›</span> Evolução no período</div><div class="grid-auto">${evolCards.join("")}</div>` : ""}
   ${cards.length ? `<div class="section-title"><span class="chev">›</span> Rankings e comparativos</div><div class="grid-auto">${cards.join("")}</div>` : ""}`;
@@ -1019,11 +1070,10 @@ function renderOverview(){
 function afterRenderOverview(){
   if(document.getElementById('chartNotaDist')){
     try{
-      const sat = computeCsat(getSatFiltered());
-      const ranked = sat.dist.map((v,i)=>({nota:i+1, count:v})).filter(r=>r.count>0).sort((a,b)=>b.nota-a.nota);
+      const dist = notaDistribution(getSatFiltered(), 10);
+      const ranked = dist.map((v,i)=>({nota:i+1, count:v})).filter(r=>r.count>0).sort((a,b)=>b.nota-a.nota);
       const labels = ranked.map(r=>`Nota ${r.nota}`); const data = ranked.map(r=>r.count);
-      const NOTA_COLORS = {5:'#5347D1', 4:'#7063F0', 3:'#FFA35C', 2:'#FF7029', 1:'#C2500F'};
-      const colors = ranked.map(r=> NOTA_COLORS[r.nota] || '#9CA3AF');
+      const colors = ranked.map(r=> heatColorForRank(r.nota, 10));
       charts.notaDist = doughnutChart('chartNotaDist', labels, data, colors, { centerText: (total)=>fmtNum(total), centerSub: 'avaliações' });
     }catch(err){ showChartError('chartNotaDist', err); }
   }
@@ -1040,10 +1090,10 @@ function afterRenderOverview(){
   if(document.getElementById('chartCsatPorSetor')){
     try{
       const bySatSetor=groupBy(getSatFiltered(),r=>r.setor||"—");
-      const ranked = Array.from(bySatSetor.entries()).map(([s,rs])=>{ const c = computeCsat(rs); return {setor:s, csat:c.csat, total:c.total}; })
-        .filter(r=>isFinite(r.csat) && r.total>0).sort((a,b)=>b.csat-a.csat).slice(0,20);
-      const labels = ranked.map(r=>r.setor); const data = ranked.map(r=>+(r.csat*100).toFixed(1)); const colors = ranked.map(r=>riskColor(r.csat, 0.85, 0.70));
-      charts.csatPorSetor = horizontalBarChart('chartCsatPorSetor', labels, data, colors, { tooltipFmt:(v,i)=>`CSAT ${v}% · ${fmtNum(ranked[i].total)} avaliações`, xTickFmt:(v)=>v+'%' });
+      const ranked = Array.from(bySatSetor.entries()).map(([s,rs])=>{ const c = computeSatisfacao(rs); return {setor:s, pct:c.pct, total:c.total}; })
+        .filter(r=>isFinite(r.pct) && r.total>0).sort((a,b)=>b.pct-a.pct).slice(0,20);
+      const labels = ranked.map(r=>r.setor); const data = ranked.map(r=>+(r.pct*100).toFixed(1)); const colors = ranked.map(r=>riskColor(r.pct, 0.90, 0.75));
+      charts.csatPorSetor = horizontalBarChart('chartCsatPorSetor', labels, data, colors, { tooltipFmt:(v,i)=>`Satisfação ${v}% · ${fmtNum(ranked[i].total)} avaliações`, xTickFmt:(v)=>v+'%' });
     }catch(err){ showChartError('chartCsatPorSetor', err); }
   }
   if(document.getElementById('chartCanalDonut')){
@@ -1062,11 +1112,11 @@ function afterRenderOverview(){
       const months = Array.from(monthSet).sort();
       const labels = months.map(m=>{ const [y,mm]=m.split("-"); return MESES_PT[+mm-1]+"/"+y.slice(2); });
       const volumeData = months.map(m=> received.filter(r=>r._date && monthKeyISO(r._date)===m).length + made.filter(r=>r._date && monthKeyISO(r._date)===m).length + chatRows.filter(r=>r._date && monthKeyISO(r._date)===m).length);
-      const csatData = months.map(m=>{ const rs = sats.filter(r=>r._date && monthKeyISO(r._date)===m); const c = computeCsat(rs); return isFinite(c.csat) ? +(c.csat*100).toFixed(1) : null; });
+      const csatData = months.map(m=>{ const rs = sats.filter(r=>r._date && monthKeyISO(r._date)===m); const c = computeSatisfacao(rs); return isFinite(c.pct) ? +(c.pct*100).toFixed(1) : null; });
       const nsData = months.map(m=>{ const rs = received.filter(r=>r._date && monthKeyISO(r._date)===m); const rm = computeReceivedMetrics(rs); return isFinite(rm.nivelServico) ? +rm.nivelServico.toFixed(1) : null; });
       charts.evolucaoMensal = lineChart('chartEvolucaoMensal', labels, [
         {label:'Volume', data:volumeData, color:'#6B7280', yAxisID:'y'},
-        {label:'CSAT (%)', data:csatData, color:'#7063F0', yAxisID:'y1'},
+        {label:'Satisfação (%)', data:csatData, color:'#7063F0', yAxisID:'y1'},
         {label:'Nível de Serviço (%)', data:nsData, color:'#5347D1', yAxisID:'y1'}
       ], { scales:{ x:{ grid:{display:false}, ticks:{font:{size:10}} },
           y:{ position:'left', min:0, grid:{color:'#F0F0F5'}, ticks:{font:{size:10}}, title:{display:true,text:'Volume',font:{size:10}} },
@@ -1083,23 +1133,36 @@ function renderSector(){
   const hasCanal=hasReceived||hasMade||hasChat;
   const byRecSetor=groupBy(received,r=>r.setor||"—"); const byMadeSetor=groupBy(made,r=>r.setor||"—"); const byChatSetor=groupBy(chatRows,r=>r.setor||"—");
   const bySatSetor=groupBy(sats,r=>r.setor||"—"); const byMonSetor=groupBy(mons,r=>r.setor||"—"); const byPauseSetor=groupBy(pauses,r=>r.setor||"—");
+  const hasResolucaoAny = (state.rows.satisfaction||[]).some(r=>r._resolucao);
+  const hasNpsAny = (state.rows.satisfaction||[]).some(r=>isFinite(r._nps));
   const rows=setores.map(s=>{
     const rm=computeReceivedMetrics(byRecSetor.get(s)||[]); const mm=computeMadeMetrics(byMadeSetor.get(s)||[]);
-    const chatCount=(byChatSetor.get(s)||[]).length; const sat=computeCsat(bySatSetor.get(s)||[]); const mon=computeMonitoria(byMonSetor.get(s)||[]);
+    const chatCount=(byChatSetor.get(s)||[]).length;
+    const satRows = bySatSetor.get(s)||[];
+    const satisfacaoM=computeSatisfacao(satRows); const resolucaoM=computeResolucao(satRows); const npsM=computeNps(satRows);
+    const mon=computeMonitoria(byMonSetor.get(s)||[]);
     const pauseTotal=sum((byPauseSetor.get(s)||[]).map(r=>r._sec)); const volume=(byRecSetor.get(s)||[]).length+(byMadeSetor.get(s)||[]).length+chatCount;
-    return {setor:s,volume,...rm,tmaComb:avg([rm.tma,mm.tma].filter(isFinite)),csat:sat.csat,notaMon:mon.media,pauseTotal};
+    return {setor:s,volume,...rm,tmaComb:avg([rm.tma,mm.tma].filter(isFinite)),
+      satisfacaoPct:satisfacaoM.pct, satisfacaoTotal:satisfacaoM.total,
+      resolucaoPct:resolucaoM.pct, resolucaoTotal:resolucaoM.total,
+      npsPct:npsM.pct, npsTotal:npsM.total,
+      notaMon:mon.media,pauseTotal};
   }).sort((a,b)=>b.volume-a.volume);
   const columns=[
     {always:true,label:"Setor",render:r=>`<b>${esc(r.setor)}</b>`}, {always:true,label:"Volume",render:r=>fmtNum(r.volume)},
     {show:hasReceived,label:"% Abandono",render:r=>isFinite(r.pctAbandono)?`<span style="color:${riskColor(r.pctAbandono,0.08,0.15,true)};font-weight:700;">${fmtPct(r.pctAbandono)}</span>`:"—"},
     {show:hasReceived,label:"Nível de Serviço",render:r=>isFinite(r.nivelServico)?`<span style="color:${riskColor(r.nivelServico/100,0.8,0.6)};font-weight:700;">${fmtPct(r.nivelServico/100)}</span>`:"—"},
     {show:hasReceived||hasMade,label:"TMA",render:r=>fmtSec(r.tmaComb)}, {show:hasReceived,label:"TME",render:r=>fmtSec(r.tme)},
-    {show:hasSat,label:"CSAT",render:r=>fmtPct(r.csat)}, {show:hasMon,label:"Nota Monitoria",render:r=>fmtPct(r.notaMon)},
+    {show:hasSat,label:"Satisfação",render:r=>fmtPct(r.satisfacaoPct)},
+    {show:hasResolucaoAny,label:"Resolução",render:r=>fmtPct(r.resolucaoPct)},
+    {show:hasNpsAny,label:"NPS",render:r=>fmtPct(r.npsPct)},
+    {show:hasMon,label:"Nota Monitoria",render:r=>fmtPct(r.notaMon)},
     {show:hasPause,label:"Tempo em Pausa",render:r=>fmtSec(r.pauseTotal)},
   ].filter(c=>c.always||c.show);
   const cards=[];
-  if(hasCanal){ const hasVolume = rows.some(r=>r.volume>0); if(hasVolume) cards.push(chartCard("Ranking de volume de atendimentos por setor","chartVolSetorDetail")); }
-  if(hasSat){ const hasCsat = rows.some(r=>isFinite(r.csat) && (bySatSetor.get(r.setor)||[]).length>0); if(hasCsat) cards.push(chartCard("Ranking de CSAT por setor","chartCsatSetorDetail")); }
+  if(hasResolucaoAny){ const hasData = rows.some(r=>r.resolucaoTotal>0); if(hasData) cards.push(chartCard("Ranking de resolução por setor","chartResolucaoSetorDetail")); }
+  if(hasNpsAny){ const hasData = rows.some(r=>r.npsTotal>0); if(hasData) cards.push(chartCard("Ranking de NPS por setor","chartNpsSetorDetail")); }
+  if(hasReceived||hasMade){ const hasTma = rows.some(r=>isFinite(r.tmaComb)||isFinite(r.tme)); if(hasTma) cards.push(chartCard("TMA e TME por setor","chartTmaTmeSetorDetail",{wide:true})); }
   return `${cards.length ? `<div class="section-title"><span class="chev">›</span> Rankings por setor</div><div class="grid-auto">${cards.join("")}</div>` : ""}
   <div class="section-title"><span class="chev">›</span> Detalhamento por setor</div>
   <div class="card"><div class="table-wrap"><table class="data-table" id="tblSector">
@@ -1108,30 +1171,43 @@ function renderSector(){
   </table></div></div>`;
 }
 function afterRenderSector(){
-  const received=getReceivedFiltered(), made=getMadeFiltered(), chatRows=getChatFiltered();
-  const byRecSetor=groupBy(received,r=>r.setor||"—"); const byMadeSetor=groupBy(made,r=>r.setor||"—"); const byChatSetor=groupBy(chatRows,r=>r.setor||"—");
+  const received=getReceivedFiltered(), made=getMadeFiltered();
+  const byRecSetor=groupBy(received,r=>r.setor||"—"); const byMadeSetor=groupBy(made,r=>r.setor||"—");
   const bySatSetor=groupBy(getSatFiltered(),r=>r.setor||"—");
   const setores = state.filters.setor==="all" ? allSetores() : [state.filters.setor];
-  if(document.getElementById('chartVolSetorDetail')){
+  if(document.getElementById('chartResolucaoSetorDetail')){
     try{
-      const ranked = setores.map(s=>{ const volume=(byRecSetor.get(s)||[]).length+(byMadeSetor.get(s)||[]).length+(byChatSetor.get(s)||[]).length; return {setor:s, volume}; })
-        .filter(r=>r.volume>0).sort((a,b)=>b.volume-a.volume).slice(0,20);
-      const colors = ranked.map((r,i)=>colorForIndex(i));
-      charts.volSetorDetail = horizontalBarChart('chartVolSetorDetail', ranked.map(r=>r.setor), ranked.map(r=>r.volume), colors, { tooltipFmt:(v)=>`${fmtNum(v)} atendimentos` });
-    }catch(err){ showChartError('chartVolSetorDetail', err); }
+      const ranked = setores.map(s=>{ const c = computeResolucao(bySatSetor.get(s)||[]); return {setor:s, pct:c.pct, total:c.total}; })
+        .filter(r=>isFinite(r.pct) && r.total>0).sort((a,b)=>b.pct-a.pct).slice(0,20);
+      const colors = ranked.map(r=>riskColor(r.pct, 0.90, 0.75));
+      charts.resolucaoSetorDetail = horizontalBarChart('chartResolucaoSetorDetail', ranked.map(r=>r.setor), ranked.map(r=>+(r.pct*100).toFixed(1)), colors, { tooltipFmt:(v,i)=>`Resolução ${v}% · ${fmtNum(ranked[i].total)} respostas`, xTickFmt:(v)=>v+'%' });
+    }catch(err){ showChartError('chartResolucaoSetorDetail', err); }
   }
-  if(document.getElementById('chartCsatSetorDetail')){
+  if(document.getElementById('chartNpsSetorDetail')){
     try{
-      const ranked = setores.map(s=>{ const c = computeCsat(bySatSetor.get(s)||[]); return {setor:s, csat:c.csat, total:c.total}; })
-        .filter(r=>isFinite(r.csat) && r.total>0).sort((a,b)=>b.csat-a.csat).slice(0,20);
-      const colors = ranked.map(r=>riskColor(r.csat, 0.85, 0.70));
-      charts.csatSetorDetail = horizontalBarChart('chartCsatSetorDetail', ranked.map(r=>r.setor), ranked.map(r=>+(r.csat*100).toFixed(1)), colors, { tooltipFmt:(v,i)=>`CSAT ${v}% · ${fmtNum(ranked[i].total)} avaliações`, xTickFmt:(v)=>v+'%' });
-    }catch(err){ showChartError('chartCsatSetorDetail', err); }
+      const ranked = setores.map(s=>{ const c = computeNps(bySatSetor.get(s)||[]); return {setor:s, pct:c.pct, total:c.total}; })
+        .filter(r=>isFinite(r.pct) && r.total>0).sort((a,b)=>b.pct-a.pct).slice(0,20);
+      const colors = ranked.map(r=>riskColor(r.pct, 0.90, 0.75));
+      charts.npsSetorDetail = horizontalBarChart('chartNpsSetorDetail', ranked.map(r=>r.setor), ranked.map(r=>+(r.pct*100).toFixed(1)), colors, { tooltipFmt:(v,i)=>`NPS ${v}% · ${fmtNum(ranked[i].total)} respostas`, xTickFmt:(v)=>v+'%' });
+    }catch(err){ showChartError('chartNpsSetorDetail', err); }
+  }
+  if(document.getElementById('chartTmaTmeSetorDetail')){
+    try{
+      const ranked = setores.map(s=>{
+        const rm=computeReceivedMetrics(byRecSetor.get(s)||[]); const mm=computeMadeMetrics(byMadeSetor.get(s)||[]);
+        return {setor:s, tma:avg([rm.tma,mm.tma].filter(isFinite)), tme:rm.tme};
+      }).filter(r=>isFinite(r.tma)||isFinite(r.tme)).sort((a,b)=>(b.tma||0)-(a.tma||0)).slice(0,20);
+      charts.tmaTmeSetorDetail = groupedHorizontalBarChart('chartTmaTmeSetorDetail', ranked.map(r=>r.setor), [
+        {label:'TMA (seg)', data: ranked.map(r=>isFinite(r.tma)?Math.round(r.tma):null), color:'#7063F0'},
+        {label:'TME (seg)', data: ranked.map(r=>isFinite(r.tme)?Math.round(r.tme):null), color:'#FFA35C'},
+      ], { tooltipFmt:(v)=>fmtSec(v) });
+    }catch(err){ showChartError('chartTmaTmeSetorDetail', err); }
   }
 }
 const RANK_TABS = [
   {key:"geral", label:"Geral", icon:ICONS.trophy}, {key:"recebidas", label:"Chamadas Recebidas", icon:ICONS.phone},
   {key:"realizadas", label:"Chamadas Realizadas", icon:ICONS.phoneOut}, {key:"satisfacao", label:"Satisfação", icon:ICONS.star},
+  {key:"resolucao", label:"Resolução", icon:ICONS.check}, {key:"nps", label:"NPS", icon:ICONS.chat},
   {key:"monitoria", label:"Monitoria", icon:ICONS.check},
 ];
 function renderRanking(){
@@ -1145,12 +1221,12 @@ function rankRow(a, i){
   const pos = i+1; const cls = pos===1?"top1":pos===2?"top2":pos===3?"top3":"";
   const initials = (a.agente||"?").split(" ").filter(Boolean).slice(0,2).map(w=>w[0]).join("").toUpperCase();
   let scoreDisplay;
-  if(rankingCategory==="satisfacao"||rankingCategory==="monitoria") scoreDisplay = isFinite(a.score)&&a.score>=0 ? a.score.toFixed(1)+"%" : "—";
+  if(["satisfacao","resolucao","nps","monitoria"].includes(rankingCategory)) scoreDisplay = isFinite(a.score)&&a.score>=0 ? a.score.toFixed(1)+"%" : "—";
   else scoreDisplay = fmtNum(a.score);
   const badgeLabel = pos<=3 ? `${pos}º Colocado` : `${pos}º lugar`;
   return `<div class="rank-row ${cls}"><div class="rank-pos">${pos}</div><div class="rank-avatar">${initials}</div>
     <div class="rank-info"><div class="rank-name">${esc(a.agente)}</div>
-    <div class="rank-sub">${fmtNum(a.recebidas)} recebidas · ${fmtNum(a.realizadas)} realizadas (≥60s) · ${fmtNum(a.chat)} chat · CSAT ${fmtPct(a.csat)} · Monitoria ${fmtPct(a.notaMonMedia)}</div></div>
+    <div class="rank-sub">${fmtNum(a.recebidas)} recebidas · ${fmtNum(a.realizadas)} realizadas (≥60s) · ${fmtNum(a.chat)} chat · Satisfação ${fmtPct(isFinite(a.satisfacaoMedia)?a.satisfacaoMedia/10:NaN)} · Resolução ${fmtPct(a.resolucaoPct)} · NPS ${fmtPct(isFinite(a.npsMedia)?a.npsMedia/10:NaN)} · Monitoria ${fmtPct(a.notaMonMedia)}</div></div>
     <div class="rank-score"><div class="val">${scoreDisplay}</div><div class="rank-badge">${badgeLabel}</div></div></div>`;
 }
 function renderQueue(){
@@ -1209,12 +1285,12 @@ function afterRenderQueue(){
 }
 function renderChat(){
   const chatRows = getChatFiltered(); const perfRows = getChatPerfFiltered(); const pm = computeChatPerfMetrics(perfRows);
-  const satChat = computeCsat(getSatFiltered()); const tr = computeTransferSummary(); const bySetor = computeChatPerfBySetor();
+  const satChat = computeSatisfacao(getSatFiltered()); const tr = computeTransferSummary(); const bySetor = computeChatPerfBySetor();
   return `<div class="section-title"><span class="chev">›</span> Performance do Chat</div>
   <div class="kpi-grid">${kpiCard("Total de chats", fmtNum(chatRows.length))}${kpiCard("TME 1ª resposta", fmtSec(pm.tmeResp), "média — fonte: Performance Chat")}
-    ${kpiCard("TMA (chat)", fmtSec(pm.tma), "fonte: Performance Chat")}${kpiCard("CSAT (canal chat)", fmtPct(satChat.csat), `${fmtNum(satChat.total)} avaliações`)}</div>
+    ${kpiCard("TMA (chat)", fmtSec(pm.tma), "fonte: Performance Chat")}${kpiCard("Satisfação (canal chat)", fmtPct(satChat.pct), `${fmtNum(satChat.total)} avaliações`)}</div>
   <div class="card" style="margin-top:14px;"><div class="card-title">Performance do chat por setor</div>
-    <div class="table-wrap"><table class="data-table"><thead><tr><th>Setor</th><th>Total de chats</th><th>TME 1ª resposta</th><th>TMA</th><th>CSAT</th></tr></thead>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>Setor</th><th>Total de chats</th><th>TME 1ª resposta</th><th>TMA</th><th>Satisfação</th></tr></thead>
     <tbody>${bySetor.length ? bySetor.map(s=>`<tr><td><b>${esc(s.setor)}</b></td><td>${fmtNum(s.total)}</td><td>${fmtSec(s.tmeResp)}</td><td>${fmtSec(s.tma)}</td><td>${fmtPct(s.csat)}</td></tr>`).join("") : `<tr><td colspan="5" style="color:var(--text-muted)">Sem dados de chat por setor no período/filtro</td></tr>`}</tbody></table></div></div>
   <div class="note-box" style="margin-top:14px;">As transferências são registradas nas abas de <b>Chamadas Recebidas/Realizadas</b> (campo "Transferiu para"), não no chat.</div>
   <div class="section-title"><span class="chev">›</span> Transferências entre setores e agentes (chamadas)</div>
@@ -1315,7 +1391,7 @@ const SUPABASE_TABLES = {
   made:         { table: "chamadas_realizadas", columns: { data:"data", destino:"destino", agente:"agente", setor:"setor", status:"status", transferPara:"transfer_para", tempoLigacao:"tempo_ligacao" } },
   chat:         { table: "chat", columns: { data:"data", agente:"agente", setor:"setor" } },
   chatPerf:     { table: "chat_performance", columns: { data:"data", agente:"agente", setor:"setor", conversasSat:"conversas_sat", satisfacaoMedia:"satisfacao_media", total:"total", tma:"tma", tmeResp:"tme_resposta" } },
-  satisfaction: { table: "satisfacao", columns: { data:"data", agente:"agente", setor:"setor", canal:"canal", nota:"nota" } },
+  satisfaction: { table: "satisfacao", columns: { data:"data", agente:"agente", setor:"setor", canal:"canal", nota:"nota", resolucao:"resolucao", nps:"nps" } },
   monitoring:   { table: "monitoria", columns: { data:"data", agente:"agente", setor:"setor", nota:"nota", canal:"canal" } },
   pause:        { table: "pausas", columns: { data:"data", agente:"agente", setor:"setor", tipo:"tipo", duracao:"duracao" } }
 };
