@@ -735,7 +735,7 @@ function allAgentes(){
 function hasAnyData(){ return Object.keys(SHEETS).some(k=> (state.rows[k]||[]).length>0); }
 function hasSheetData(key){ return (state.rows[key]||[]).length>0; }
 function buildAgentRanking(category){
-  const RANKING_MIN_AVALIACOES = 10; // exige MAIS de 10 respostas (>10) para entrar no ranking de Satisfação/Resolução/NPS
+  const RANKING_C = 10; // "peso da dúvida" — quanto de volume equivale a uma nota confiável
   const received = getReceivedFiltered();
   const made = getMadeFiltered();
   const chatRows = getChatFiltered();
@@ -752,6 +752,16 @@ function buildAgentRanking(category){
   const byChat = groupBy(chatRows, r=>r.agente||"—");
   const bySat = groupBy(sats, r=>r.agente||"—");
   const byMon = groupBy(mons, r=>r.agente||"—");
+
+  // Médias do time inteiro (no período/filtro atual) — usadas como "âncora" da fórmula ponderada:
+  // quem tem poucas avaliações fica mais perto dessas médias; quem tem muitas, fica perto da própria nota real.
+  const satValid = sats.filter(r=>isFinite(r._nota));
+  const resValid = sats.filter(r=>r._resolucao==="Sim"||r._resolucao==="Não");
+  const npsValid = sats.filter(r=>isFinite(r._nps));
+  const globalSatisfacao = satValid.length ? avg(satValid.map(r=>r._nota)) : NaN;      // escala 0–10
+  const globalResolucao = resValid.length ? resValid.filter(r=>r._resolucao==="Sim").length/resValid.length : NaN; // fração 0–1
+  const globalNps = npsValid.length ? avg(npsValid.map(r=>r._nps)) : NaN;              // escala 0–10
+
   const list = Array.from(agentSet).map(agente=>{
     const recList = byRec.get(agente)||[];
     const madeList = byMade.get(agente)||[];
@@ -763,17 +773,28 @@ function buildAgentRanking(category){
     const npsList = satAllList.filter(r=>isFinite(r._nps));
     const mList = (byMon.get(agente)||[]).filter(r=>isFinite(r._nota));
     const total = recList.length + madeValidList.length + chatList.length;
+
+    // Notas reais (não ponderadas) — servem só de referência/exibição
     const satisfacaoMedia = satList.length ? avg(satList.map(r=>r._nota)) : NaN;
     const resolucaoPct = resList.length ? resList.filter(r=>r._resolucao==="Sim").length/resList.length : NaN;
     const npsMedia = npsList.length ? avg(npsList.map(r=>r._nps)) : NaN;
     const notaMonMedia = mList.length ? avg(mList.map(r=>r._nota)) : NaN;
+
+    // Notas ponderadas: (n*média_do_agente + C*média_do_time) / (n+C) — sem exigir mínimo de avaliações
+    const satisfacaoPonderada = (satList.length && isFinite(globalSatisfacao))
+      ? (satList.length*satisfacaoMedia + RANKING_C*globalSatisfacao)/(satList.length+RANKING_C) : NaN;
+    const resolucaoPonderada = (resList.length && isFinite(globalResolucao))
+      ? (resList.length*resolucaoPct + RANKING_C*globalResolucao)/(resList.length+RANKING_C) : NaN;
+    const npsPonderado = (npsList.length && isFinite(globalNps))
+      ? (npsList.length*npsMedia + RANKING_C*globalNps)/(npsList.length+RANKING_C) : NaN;
+
     let score;
     if(category==="geral") score = total;
     else if(category==="recebidas") score = recList.length;
     else if(category==="realizadas") score = madeValidList.length;
-    else if(category==="satisfacao") score = isFinite(satisfacaoMedia)? satisfacaoMedia/10*100 : -1;
-    else if(category==="resolucao") score = isFinite(resolucaoPct)? resolucaoPct*100 : -1;
-    else if(category==="nps") score = isFinite(npsMedia)? npsMedia/10*100 : -1;
+    else if(category==="satisfacao") score = isFinite(satisfacaoPonderada)? satisfacaoPonderada/10*100 : -1;
+    else if(category==="resolucao") score = isFinite(resolucaoPonderada)? resolucaoPonderada*100 : -1;
+    else if(category==="nps") score = isFinite(npsPonderado)? npsPonderado/10*100 : -1;
     else if(category==="monitoria") score = isFinite(notaMonMedia)? notaMonMedia*100 : -1;
     return {agente, total, recebidas:recList.length, realizadas:madeValidList.length, chat:chatList.length,
       satisfacaoMedia, satisfacaoTotal:satList.length,
@@ -781,12 +802,7 @@ function buildAgentRanking(category){
       npsMedia, npsTotal:npsList.length,
       notaMonMedia, score};
   });
-  return list.filter(a=>{
-    if(category==="satisfacao") return a.score>=0 && a.satisfacaoTotal>RANKING_MIN_AVALIACOES;
-    if(category==="resolucao") return a.score>=0 && a.resolucaoTotal>RANKING_MIN_AVALIACOES;
-    if(category==="nps") return a.score>=0 && a.npsTotal>RANKING_MIN_AVALIACOES;
-    return a.score>=0 || category==="geral";
-  }).sort((a,b)=>b.score-a.score);
+  return list.filter(a=>a.score>=0 || category==="geral").sort((a,b)=>b.score-a.score);
 }
 const ICONS = {
   overview: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>`,
@@ -1224,7 +1240,7 @@ function renderRanking(){
   const list = buildAgentRanking(rankingCategory);
   return `<div class="ranking-tabs">${RANK_TABS.map(t=>`<button class="rtab ${rankingCategory===t.key?'active':''}" data-rank-tab="${t.key}">${t.icon}${t.label}</button>`).join("")}</div>
   ${rankingCategory==="realizadas" ? `<p class="kpi-sub" style="margin-bottom:12px;">Considera apenas chamadas realizadas <b>atendidas</b> com duração <b>igual ou superior a 60s</b>.</p>` : ""}
-  ${["satisfacao","resolucao","nps"].includes(rankingCategory) ? `<p class="kpi-sub" style="margin-bottom:12px;">Só entram no ranking agentes com <b>mais de 10 avaliações</b> no período — evita que uma amostra pequena (ex.: agente que já saiu, ou muito recente) distorça o resultado.</p>` : ""}
+  ${["satisfacao","resolucao","nps"].includes(rankingCategory) ? `<p class="kpi-sub" style="margin-bottom:12px;">A nota usa <b>média ponderada</b>: quem tem poucas avaliações fica com a nota mais próxima da média do time, até acumular mais avaliações e a nota real passar a valer mais — sem excluir ninguém do ranking. A nota real (sem ponderar) aparece entre parênteses.</p>` : ""}
   <div class="rank-list">${list.length===0 ? `<div class="empty-state"><h3>Sem dados suficientes para este ranking</h3></div>` : list.slice(0,50).map((a,i)=>rankRow(a,i)).join("")}</div>`;
 }
 function afterRenderRanking(){}
@@ -1235,9 +1251,9 @@ function rankRow(a, i){
   if(["satisfacao","resolucao","nps","monitoria"].includes(rankingCategory)) scoreDisplay = isFinite(a.score)&&a.score>=0 ? a.score.toFixed(1)+"%" : "—";
   else scoreDisplay = fmtNum(a.score);
   let countLabel = "";
-  if(rankingCategory==="satisfacao") countLabel = `${fmtNum(a.satisfacaoTotal)} avaliações`;
-  else if(rankingCategory==="resolucao") countLabel = `${fmtNum(a.resolucaoTotal)} respostas`;
-  else if(rankingCategory==="nps") countLabel = `${fmtNum(a.npsTotal)} respostas`;
+  if(rankingCategory==="satisfacao") countLabel = `${fmtNum(a.satisfacaoTotal)} avaliações (real: ${fmtPct(isFinite(a.satisfacaoMedia)?a.satisfacaoMedia/10:NaN)})`;
+  else if(rankingCategory==="resolucao") countLabel = `${fmtNum(a.resolucaoTotal)} respostas (real: ${fmtPct(a.resolucaoPct)})`;
+  else if(rankingCategory==="nps") countLabel = `${fmtNum(a.npsTotal)} respostas (real: ${fmtPct(isFinite(a.npsMedia)?a.npsMedia/10:NaN)})`;
   const badgeLabel = pos<=3 ? `${pos}º Colocado` : `${pos}º lugar`;
   return `<div class="rank-row ${cls}"><div class="rank-pos">${pos}</div><div class="rank-avatar">${initials}</div>
     <div class="rank-info"><div class="rank-name">${esc(a.agente)}</div>
