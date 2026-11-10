@@ -11,7 +11,8 @@
 //   3. Salve e execute syncAll uma vez.
 //
 // O que faz: envia ao Supabase a extração MAIS RECENTE da aba PROTOCOLOS e o conteúdo
-// das abas SALDO PROTOCOLOS e MOVIMENTO PROTOCOLOS. Só reenvia quando algo mudou na
+// das abas SALDO PROTOCOLOS e MOVIMENTO PROTOCOLOS. O nome do agente vai como o nome
+// curto da aba DE-PARA, mesmo que na aba PROTOCOLOS esteja o nome completo do sistema. Só reenvia quando algo mudou na
 // planilha, para não regravar ~22 mil linhas a cada hora.
 // Para forçar um reenvio, execute a função reenviarProtocolosSupabase.
 // ============================================================
@@ -38,6 +39,10 @@ function enviarProtocolosSupabase(forcar) {
       return isNaN(n) ? null : n;
     };
     const inteiro = v => { const n = numero(v); return n === null ? null : Math.round(n); };
+    // Troca o nome que vem do sistema pelo nome curto da aba DE-PARA (coluna A -> coluna B).
+    // Se a aba não existir ou o nome não estiver nela, mantém o nome como está.
+    const curtos = _protoNomesCurtos();
+    const agente = v => { const t = texto(v); return t === null ? null : (curtos[_protoChaveNome(t)] || t.replace(/\s+/g, " ")); };
 
     // ---- aba PROTOCOLOS: só a extração mais recente ----
     const abaDados = findSheetCaseInsensitive(PROTOCOLOS.abaDados);
@@ -63,7 +68,7 @@ function enviarProtocolosSupabase(forcar) {
         numero_protocolo: num,
         status: texto(r[dados.idx.status]),
         criado_em: diaHora(r[dados.idx.criado_em]),
-        agente: texto(r[dados.idx.agente]),
+        agente: agente(r[dados.idx.agente]),
         setor: texto(r[dados.idx.setor]) || "Sem setor",
         categoria: texto(r[dados.idx.categoria])
       });
@@ -111,7 +116,7 @@ function enviarProtocolosSupabase(forcar) {
           movimento: texto(r[col("movimento")]),
           setor: texto(r[col("setor")]) || "Sem setor",
           setor_anterior: texto(r[col("setor_anterior")]),
-          agente: texto(r[col("agente")]),
+          agente: agente(r[col("agente")]),
           categoria: texto(r[col("categoria")]),
           criado_em: diaHora(r[col("criado_em")]),
           dias_em_aberto: inteiro(r[col("dias_em_aberto")])
@@ -158,6 +163,23 @@ function _protoLerAba(aba) {
   values[0].forEach((h, i) => { idx[String(h).trim().toLowerCase()] = i; });
   const linhas = values.slice(1).filter(r => r.some(v => v !== "" && v !== null));
   return { idx: idx, linhas: linhas };
+}
+
+function _protoChaveNome(nome) {
+  return String(nome).replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+// Lê a aba DE-PARA: coluna A = nome no sistema, coluna B = nome curto.
+function _protoNomesCurtos() {
+  const mapa = {};
+  const aba = findSheetCaseInsensitive("DE-PARA");
+  if (!aba) return mapa;
+  aba.getDataRange().getValues().slice(1).forEach(r => {
+    const sistema = String(r[0] === null ? "" : r[0]).trim();
+    const curto = String(r[1] === null || r[1] === undefined ? "" : r[1]).trim();
+    if (sistema && curto) mapa[_protoChaveNome(sistema)] = curto;
+  });
+  return mapa;
 }
 
 function _protoAssinatura(obj) {
