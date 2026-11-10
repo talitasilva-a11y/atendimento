@@ -236,6 +236,13 @@ table.data-table tbody tr:hover{background:#FAFAFD;}
   line-height:1.5;margin-top:8px;
 }
 .note-box.warn{background:var(--orange-light);color:var(--orange-deep2);}
+.proto-note{background:var(--card);border:1px solid var(--border);border-left:4px solid var(--purple);border-radius:10px;
+  padding:10px 14px;font-size:12.5px;color:var(--text-muted);margin:0 0 14px;line-height:1.5;}
+.proto-controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;}
+.proto-search{flex:1 1 240px;min-width:200px;}
+.proto-count{font-size:12px;color:var(--text-muted);margin-bottom:8px;}
+.proto-pager{display:flex;gap:12px;align-items:center;justify-content:flex-end;margin-top:12px;font-size:12px;color:var(--text-muted);}
+.proto-pager .btn[disabled]{opacity:.45;cursor:default;}
 .empty-state{text-align:center;padding:60px 20px;color:var(--text-muted);}
 .empty-state svg{width:52px;height:52px;margin-bottom:14px;opacity:.5;}
 .empty-state h3{color:var(--text);margin-bottom:6px;}
@@ -372,8 +379,24 @@ const SHEETS = {
   monitoring: { label: "Monitoria", fields: [
     {key:"data"},{key:"agente"},{key:"setor"},{key:"nota"},{key:"canal"} ] },
   pause: { label: "Pausa", fields: [
-    {key:"data"},{key:"agente"},{key:"setor"},{key:"tipo"},{key:"duracao"} ] }
+    {key:"data"},{key:"agente"},{key:"setor"},{key:"tipo"},{key:"duracao"} ] },
+  /* Protocolos: fontes opcionais (não contam no indicador "x/7 fontes com dados"). */
+  protocols: { label: "Protocolos", optional:true, fields: [
+    {key:"dataExtracao"},{key:"numero"},{key:"status"},{key:"criadoEm"},{key:"agente"},{key:"setor"},{key:"categoria"} ] },
+  protoSaldo: { label: "Saldo de Protocolos", optional:true, fields: [
+    {key:"dataExtracao"},{key:"tipo"},{key:"setor"},{key:"saldoAnterior"},{key:"novos"},{key:"transfEntrada"},{key:"transfSaida"},
+    {key:"fechados"},{key:"saldoAtual"},{key:"pendentes30"},{key:"tempoMedio"},{key:"taxaFechamento"} ] },
+  protoMov: { label: "Movimento de Protocolos", optional:true, fields: [
+    {key:"dataExtracao"},{key:"numero"},{key:"movimento"},{key:"setor"},{key:"setorAnterior"},{key:"agente"},{key:"categoria"},{key:"criadoEm"},{key:"diasEmAberto"} ] }
 };
+/* Protocolos criados até esta data são "legado"; depois dela, "corrente". */
+const PROTO_LEGADO_ATE = new Date(2026, 6, 31, 23, 59, 59);
+function diffDays(de, ate){
+  if(!de || !ate) return NaN;
+  const a = new Date(ate.getFullYear(), ate.getMonth(), ate.getDate());
+  const b = new Date(de.getFullYear(), de.getMonth(), de.getDate());
+  return Math.max(0, Math.round((a-b)/86400000));
+}
 
 let state = {
   mapping: {},
@@ -455,6 +478,24 @@ const SHEET_ENRICHERS = {
   satisfaction: r=>{ r._date=parseDateFlexible(r.data); r._nota=toNumber(r.nota); r._resolucao=normalizeResolucao(r.resolucao); r._nps=toNumber(r.nps); },
   monitoring: r=>{ r._date=parseDateFlexible(r.data); r._nota=normalizeFraction(toNumber(r.nota)); },
   pause: r=>{ r._date=parseDateFlexible(r.data); r._sec=toNumber(r.duracao); },
+  protocols: r=>{
+    r._ext=parseDateFlexible(r.dataExtracao); r._date=parseDateFlexible(r.criadoEm);
+    r.setor=String(r.setor||"").trim()||"Sem setor";
+    r._status=String(r.status||"").trim().toUpperCase();
+    r._dias=diffDays(r._date, r._ext);
+    r._legado=!!(r._date && r._date<=PROTO_LEGADO_ATE);
+  },
+  protoSaldo: r=>{
+    r._ext=parseDateFlexible(r.dataExtracao); r.setor=String(r.setor||"").trim()||"Sem setor";
+    const n=v=>{ const x=toNumber(v); return isFinite(x)?x:0; };
+    r._anterior=n(r.saldoAnterior); r._novos=n(r.novos); r._tin=n(r.transfEntrada); r._tout=n(r.transfSaida);
+    r._fechados=n(r.fechados); r._saldo=n(r.saldoAtual);
+  },
+  protoMov: r=>{
+    r._ext=parseDateFlexible(r.dataExtracao); r._date=parseDateFlexible(r.criadoEm);
+    r.setor=String(r.setor||"").trim()||"Sem setor";
+    r._legado=!!(r._date && r._date<=PROTO_LEGADO_ATE);
+  },
 };
 function normalizeSheet(key){
   const map = state.mapping[key] || {};
@@ -815,6 +856,7 @@ const ICONS = {
   phoneOut: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 7l-10 10M17 7h-5M17 7v5"/></svg>`,
   star: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>`,
   check: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>`,
+  protocols: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>`,
   trophy: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 01-10 0V4zM7 6H4a2 2 0 002 2M17 6h3a2 2 0 01-2 2"/></svg>`
 };
 const NAV = [
@@ -824,6 +866,7 @@ const NAV = [
   {key:"queue", label:"Fila & SLA", icon:ICONS.queue},
   {key:"chat", label:"Chat & Transferências", icon:ICONS.chat},
   {key:"pause", label:"Pausas", icon:ICONS.pause},
+  {key:"protocols", label:"Protocolos", icon:ICONS.protocols},
 ];
 let currentScreen = "overview";
 let charts = {};
@@ -845,7 +888,7 @@ function goToScreen(key){
   currentScreen = key;
   renderNav();
   const titles = {overview:"Visão Geral", sector:"Por Setor", ranking:"Ranking de Agentes",
-    queue:"Fila & SLA", chat:"Chat & Transferências", pause:"Pausas"};
+    queue:"Fila & SLA", chat:"Chat & Transferências", pause:"Pausas", protocols:"Protocolos"};
   document.getElementById('screenTitle').textContent = titles[key] || key;
   renderGlobalFilters();
   renderScreen();
@@ -853,25 +896,28 @@ function goToScreen(key){
 function renderGlobalFilters(){
   const box = document.getElementById('globalFilters');
   if(!hasAnyData()){ box.innerHTML = ""; return; }
-  const setores = allSetores();
+  const isProto = currentScreen==="protocols";
+  /* Na tela de Protocolos só vale o filtro de setor: a lista é uma foto da última extração. */
+  const setores = isProto ? protoSetores() : allSetores();
+  if(state.filters.setor!=="all" && !setores.includes(state.filters.setor)) state.filters.setor = "all";
   const agentes = allAgentes();
   const months = allMonthsAvailable();
   box.innerHTML = `
-    <select class="filter-select" id="fPeriod">
+    ${!isProto ? `<select class="filter-select" id="fPeriod">
       <option value="all">Todos os meses</option>
       ${months.map(m=>`<option value="${m}">${monthLabelFromISO(m)}</option>`).join("")}
-    </select>
+    </select>` : ""}
     <select class="filter-select" id="fSetor"><option value="all">Todos os setores</option>${setores.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join("")}</select>
     ${currentScreen==="ranking"||currentScreen==="pause" ? `<select class="filter-select" id="fAgente"><option value="all">Todos os agentes</option>${agentes.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join("")}</select>` : ""}
-    ${currentScreen!=="pause" ? `<select class="filter-select" id="fCanal"><option value="all">Todos os canais</option><option value="Receptivo">Receptivo</option><option value="Ativo">Ativo</option><option value="Chat">Chat</option></select>` : ""}
+    ${currentScreen!=="pause" && !isProto ? `<select class="filter-select" id="fCanal"><option value="all">Todos os canais</option><option value="Receptivo">Receptivo</option><option value="Ativo">Ativo</option><option value="Chat">Chat</option></select>` : ""}
     <button class="btn btn-ghost btn-sm" id="btnRefresh">↻ Atualizar dados</button>
   `;
-  document.getElementById('fPeriod').value = state.filters.period;
+  if(document.getElementById('fPeriod')) document.getElementById('fPeriod').value = state.filters.period;
   document.getElementById('fSetor').value = state.filters.setor;
   if(document.getElementById('fCanal')) document.getElementById('fCanal').value = state.filters.canal;
   if(document.getElementById('fAgente')) document.getElementById('fAgente').value = state.filters.agente;
-  document.getElementById('fPeriod').addEventListener('change', e=>{state.filters.period=e.target.value; renderScreen();});
-  document.getElementById('fSetor').addEventListener('change', e=>{state.filters.setor=e.target.value; renderScreen();});
+  if(document.getElementById('fPeriod')) document.getElementById('fPeriod').addEventListener('change', e=>{state.filters.period=e.target.value; renderScreen();});
+  document.getElementById('fSetor').addEventListener('change', e=>{state.filters.setor=e.target.value; protoUI.page=0; renderScreen();});
   if(document.getElementById('fCanal')) document.getElementById('fCanal').addEventListener('change', e=>{state.filters.canal=e.target.value; renderScreen();});
   if(document.getElementById('fAgente')) document.getElementById('fAgente').addEventListener('change', e=>{state.filters.agente=e.target.value; renderScreen();});
   document.getElementById('btnRefresh').addEventListener('click', refreshAllData);
@@ -887,6 +933,7 @@ function renderScreen(){
   else if(currentScreen==="queue"){ content.innerHTML = renderQueue(); afterRenderQueue(); }
   else if(currentScreen==="chat"){ content.innerHTML = renderChat(); afterRenderChat(); }
   else if(currentScreen==="pause"){ content.innerHTML = renderPause(); afterRenderPause(); }
+  else if(currentScreen==="protocols"){ content.innerHTML = renderProtocols(); afterRenderProtocols(); }
   bindScreenEvents();
 }
 function emptyState(){
@@ -1044,6 +1091,7 @@ function renderOverview(){
     hasMon ? kpiCard("Nota de monitoria", fmtPct(mon.media), `${fmtNum(mon.total)} monitorias · ${fmtPct(mon.pctMax)} nota máxima`, badgeFor(mon.media,0.85)) : "",
     (hasReceived||hasMade) ? kpiCard("TMA", fmtSec(avg([rm.tma, mm.tma].filter(isFinite))), "receptivo + ativo") : "",
     hasReceived ? kpiCard("TME", fmtSec(rm.tme), "tempo médio de espera (receptivo)") : "",
+    protoOverviewKpi(),
   ].filter(Boolean);
   const monthMap = new Map(); const weekday = [0,0,0,0,0,0,0]; const setorMap = new Map(); const setorMonthMap = new Map();
   function tally(rows, canalKey){
@@ -1161,6 +1209,7 @@ function renderSector(){
   const bySatSetor=groupBy(sats,r=>r.setor||"—"); const byMonSetor=groupBy(mons,r=>r.setor||"—"); const byPauseSetor=groupBy(pauses,r=>r.setor||"—");
   const hasResolucaoAny = (state.rows.satisfaction||[]).some(r=>r._resolucao);
   const hasNpsAny = (state.rows.satisfaction||[]).some(r=>isFinite(r._nps));
+  const hasProto=hasSheetData('protocols'); const byProtoSetor=groupBy(protoLatest(),r=>r.setor);
   const rows=setores.map(s=>{
     const rm=computeReceivedMetrics(byRecSetor.get(s)||[]); const mm=computeMadeMetrics(byMadeSetor.get(s)||[]);
     const chatCount=(byChatSetor.get(s)||[]).length;
@@ -1168,7 +1217,9 @@ function renderSector(){
     const satisfacaoM=computeSatisfacao(satRows); const resolucaoM=computeResolucao(satRows); const npsM=computeNps(satRows);
     const mon=computeMonitoria(byMonSetor.get(s)||[]);
     const pauseTotal=sum((byPauseSetor.get(s)||[]).map(r=>r._sec)); const volume=(byRecSetor.get(s)||[]).length+(byMadeSetor.get(s)||[]).length+chatCount;
+    const protoRows=byProtoSetor.get(s)||[]; const protoCorr=protoRows.filter(r=>!r._legado);
     return {setor:s,volume,...rm,tmaComb:avg([rm.tma,mm.tma].filter(isFinite)),
+      protoCorr:protoCorr.length, protoMais30:protoCorr.filter(r=>r._dias>PROTO_DIAS_ALERTA).length, protoLeg:protoRows.length-protoCorr.length,
       satisfacaoPct:satisfacaoM.pct, satisfacaoTotal:satisfacaoM.total,
       resolucaoPct:resolucaoM.pct, resolucaoTotal:resolucaoM.total,
       npsPct:npsM.pct, npsTotal:npsM.total,
@@ -1184,6 +1235,9 @@ function renderSector(){
     {show:hasNpsAny,label:"NPS",render:r=>fmtPct(r.npsPct)},
     {show:hasMon,label:"Nota Monitoria",render:r=>fmtPct(r.notaMon)},
     {show:hasPause,label:"Tempo em Pausa",render:r=>fmtSec(r.pauseTotal)},
+    {show:hasProto,label:"Protocolos abertos",render:r=>`<b>${fmtNum(r.protoCorr)}</b>`},
+    {show:hasProto,label:"Protocolos +30 dias",render:r=>r.protoCorr?`<span style="color:${riskColor(r.protoMais30/r.protoCorr,0.2,0.5,true)};font-weight:700;">${fmtNum(r.protoMais30)}</span>`:"—"},
+    {show:hasProto,label:"Protocolos legado",render:r=>fmtNum(r.protoLeg)},
   ].filter(c=>c.always||c.show);
   const cards=[];
   if(hasResolucaoAny){ const hasData = rows.some(r=>r.resolucaoTotal>0); if(hasData) cards.push(chartCard("Ranking de resolução por setor","chartResolucaoSetorDetail")); }
@@ -1193,8 +1247,9 @@ function renderSector(){
   <div class="section-title"><span class="chev">›</span> Detalhamento por setor</div>
   <div class="card"><div class="table-wrap"><table class="data-table" id="tblSector">
     <thead><tr>${columns.map(c=>`<th>${c.label}</th>`).join("")}</tr></thead>
-    <tbody>${rows.filter(r=>r.volume>0 || setores.length===1).map(r=>`<tr>${columns.map(c=>`<td>${c.render(r)}</td>`).join("")}</tr>`).join("")}</tbody>
-  </table></div></div>`;
+    <tbody>${rows.filter(r=>r.volume>0 || setores.length===1 || (r.protoCorr+r.protoLeg)>0).map(r=>`<tr>${columns.map(c=>`<td>${c.render(r)}</td>`).join("")}</tr>`).join("")}</tbody>
+  </table></div></div>
+  ${hasProto ? `<p class="kpi-sub" style="margin-top:10px;">As colunas de protocolos mostram a posição da extração de <b>${fmtDate(protoExtracao())}</b> e não mudam com o filtro de mês. "Abertos" e "+30 dias" consideram só os criados a partir de ${protoCorrenteLabel()}; os anteriores ficam em "legado".</p>` : ""}`;
 }
 function afterRenderSector(){
   const received=getReceivedFiltered(), made=getMadeFiltered();
@@ -1386,15 +1441,358 @@ function afterRenderPause(){
     charts.pausaTipoDonut = doughnutChart('chartPausaTipoDonut', labels, data, colors, { centerText:(t)=>fmtSec(t), centerSub:'tempo total' });
   }catch(err){ showChartError('chartPausaTipoDonut', err); }
 }
+/* ============================================================
+   PROTOCOLOS
+   A tabela "protocolos" traz a foto dos protocolos em aberto na última extração.
+   Corrente = criados depois de PROTO_LEGADO_ATE; Legado = criados até essa data.
+   O fechamento é feito no sistema de atendimento: o protocolo sai da lista na
+   extração seguinte e entra como "Fechado" na evolução entre extrações.
+   ============================================================ */
+const PROTO_FAIXAS = [
+  {key:"f0", label:"0 a 7 dias", min:0, max:7, color:'#7063F0', pill:'pill-purple'},
+  {key:"f1", label:"8 a 30 dias", min:8, max:30, color:'#9C93F5', pill:'pill-purple'},
+  {key:"f2", label:"31 a 90 dias", min:31, max:90, color:'#FFA35C', pill:'pill-orange'},
+  {key:"f3", label:"Mais de 90 dias", min:91, max:Infinity, color:'#FF7029', pill:'pill-red'},
+];
+const PROTO_DIAS_ALERTA = 30;
+const PROTO_PAGE_SIZE = 50;
+let protoUI = {scope:"corrente", status:"all", categoria:"all", faixa:"all", agente:"all", busca:"", page:0};
+
+function protoFaixaOf(dias){
+  if(!isFinite(dias)) return null;
+  return PROTO_FAIXAS.find(f=>dias>=f.min && dias<=f.max) || null;
+}
+function fmtDate(d){ return d ? String(d.getDate()).padStart(2,'0')+"/"+String(d.getMonth()+1).padStart(2,'0')+"/"+d.getFullYear() : "—"; }
+function fmtDateTime(d){ return d ? fmtDate(d)+" "+String(d.getHours()).padStart(2,'0')+":"+String(d.getMinutes()).padStart(2,'0') : "—"; }
+function protoLegadoLabel(){ return fmtDate(PROTO_LEGADO_ATE); }
+function protoCorrenteLabel(){ const d = new Date(PROTO_LEGADO_ATE.getTime()+1000); return fmtDate(d); }
+
+/* Só a extração mais recente conta como "em aberto agora". */
+function protoLatest(){
+  const rows = state.rows.protocols || [];
+  if(protoLatest._src===rows) return protoLatest._out;
+  let max = 0;
+  for(const r of rows){ if(r._ext && r._ext.getTime()>max) max = r._ext.getTime(); }
+  const out = max ? rows.filter(r=>r._ext && r._ext.getTime()===max) : rows.slice();
+  protoLatest._src = rows; protoLatest._out = out; protoLatest._ext = max ? new Date(max) : null;
+  return out;
+}
+function protoExtracao(){ protoLatest(); return protoLatest._ext || null; }
+function protoSetores(){
+  const s = new Set();
+  protoLatest().forEach(r=>s.add(r.setor));
+  (state.rows.protoSaldo||[]).forEach(r=>{ if(r.setor) s.add(r.setor); });
+  return Array.from(s).sort();
+}
+function protoBase(){
+  const f = state.filters.setor;
+  return f==="all" ? protoLatest() : protoLatest().filter(r=>r.setor===f);
+}
+function protoScoped(rows){
+  if(protoUI.scope==="todos") return rows;
+  return rows.filter(r=> protoUI.scope==="legado" ? r._legado : !r._legado);
+}
+function protoResumo(rows){
+  const dias = rows.map(r=>r._dias).filter(isFinite).sort((a,b)=>a-b);
+  const mediana = dias.length ? (dias.length%2 ? dias[(dias.length-1)/2] : (dias[dias.length/2-1]+dias[dias.length/2])/2) : NaN;
+  return {
+    total: rows.length,
+    aguardando: rows.filter(r=>r._status==="AGUARDANDO").length,
+    andamento: rows.filter(r=>r._status==="ANDAMENTO").length,
+    mais30: rows.filter(r=>r._dias>PROTO_DIAS_ALERTA).length,
+    media: avg(dias), mediana,
+    maisAntigo: dias.length ? dias[dias.length-1] : NaN
+  };
+}
+function protoStatusPill(st){
+  if(st==="AGUARDANDO") return `<span class="pill pill-orange">Aguardando</span>`;
+  if(st==="ANDAMENTO") return `<span class="pill pill-purple">Em andamento</span>`;
+  return `<span class="pill pill-gray">${esc(st||"—")}</span>`;
+}
+function protoDiasPill(dias){
+  const f = protoFaixaOf(dias);
+  return f ? `<span class="pill ${f.pill}">${fmtNum(dias)} ${dias===1?"dia":"dias"}</span>` : "—";
+}
+
+/* ---------- Evolução entre extrações (abas SALDO e MOVIMENTO) ---------- */
+function protoEvolucao(){
+  const f = state.filters.setor;
+  const saldo = (state.rows.protoSaldo||[]).filter(r=>r._ext && (f==="all" || r.setor===f));
+  const mov = (state.rows.protoMov||[]).filter(r=>r._ext && (f==="all" || r.setor===f));
+  const byExt = new Map();
+  saldo.forEach(r=>{
+    const k = r._ext.getTime();
+    if(!byExt.has(k)) byExt.set(k, {data:r._ext, corte:true, anterior:0, novos:0, tin:0, tout:0, fechados:0, saldo:0, fechCorr:0, fechLeg:0, setores:[]});
+    const e = byExt.get(k);
+    if(String(r.tipo||"").toLowerCase().indexOf("corte")===-1) e.corte = false;
+    e.anterior += r._anterior||0; e.novos += r._novos||0; e.tin += r._tin||0; e.tout += r._tout||0;
+    e.fechados += r._fechados||0; e.saldo += r._saldo||0;
+    e.setores.push(r);
+  });
+  mov.forEach(r=>{
+    const e = byExt.get(r._ext.getTime());
+    if(!e || String(r.movimento||"").toLowerCase()!=="fechado") return;
+    if(r._legado) e.fechLeg++; else e.fechCorr++;
+  });
+  return Array.from(byExt.values()).sort((a,b)=>a.data-b.data).map(e=>{
+    const base = e.anterior + e.novos + e.tin;
+    e.taxa = (!e.corte && base>0) ? e.fechados/base : NaN;
+    return e;
+  });
+}
+
+/* ---------- Tela ---------- */
+function renderProtocols(){
+  const ext = protoExtracao();
+  if(!hasSheetData('protocols')){
+    return `<div class="empty-state">${ICONS.protocols}<h3>Nenhum protocolo encontrado para o seu acesso</h3>
+      <p>Os protocolos aparecem aqui depois que a planilha enviar a primeira extração para o painel.</p></div>`;
+  }
+  const base = protoBase();
+  const rows = protoScoped(base);
+  const corr = base.filter(r=>!r._legado), leg = base.filter(r=>r._legado);
+  const res = protoResumo(rows);
+  const scopeTabs = [
+    {key:"corrente", label:`Corrente (${fmtNum(corr.length)})`},
+    {key:"legado", label:`Legado (${fmtNum(leg.length)})`},
+    {key:"todos", label:`Todos (${fmtNum(base.length)})`},
+  ];
+  const scopeNome = protoUI.scope==="corrente" ? "corrente" : protoUI.scope==="legado" ? "legado" : "corrente + legado";
+  const pct = v => res.total ? fmtPct(v/res.total) : "—";
+  const kpis = [
+    kpiCard("Em aberto · corrente", fmtNum(corr.length), `criados a partir de ${protoCorrenteLabel()}`),
+    kpiCard("Em aberto · legado", fmtNum(leg.length), `criados até ${protoLegadoLabel()}`),
+    kpiCard("Total em aberto", fmtNum(base.length), "corrente + legado"),
+    kpiCard("Aguardando", fmtNum(res.aguardando), `${pct(res.aguardando)} do recorte ${scopeNome}`),
+    kpiCard("Em andamento", fmtNum(res.andamento), `${pct(res.andamento)} do recorte ${scopeNome}`),
+    kpiCard(`Pendentes há mais de ${PROTO_DIAS_ALERTA} dias`, fmtNum(res.mais30), `${pct(res.mais30)} do recorte ${scopeNome}`,
+      res.total ? (res.mais30/res.total<=0.2 ? `<span class="kpi-badge badge-good">bom</span>` : `<span class="kpi-badge badge-bad">atenção</span>`) : ""),
+    kpiCard("Tempo médio em aberto", isFinite(res.media) ? fmtNum(res.media,1)+" dias" : "—",
+      isFinite(res.mediana) ? `mediana ${fmtNum(res.mediana)} dias · mais antigo ${fmtNum(res.maisAntigo)} dias` : ""),
+  ];
+
+  const cards = [];
+  if(rows.length){
+    cards.push(chartCard("Protocolos por tempo em aberto","chartProtoFaixa",{wide:false}));
+    cards.push(chartCard("Protocolos por categoria (10 maiores)","chartProtoCategoria",{wide:false}));
+    cards.push(chartCard("Protocolos em aberto por mês de criação","chartProtoMes",{wide:true}));
+  }
+
+  /* Tabela por setor: sempre mostra corrente e legado lado a lado */
+  const bySetor = groupBy(base, r=>r.setor);
+  const setorRows = Array.from(bySetor.entries()).map(([s, rs])=>{
+    const c = rs.filter(r=>!r._legado); const rc = protoResumo(c);
+    return {s, total:rs.length, corr:c.length, leg:rs.length-c.length, aguard:rc.aguardando, mais30:rc.mais30, media:rc.media};
+  }).sort((a,b)=>b.corr-a.corr || b.total-a.total);
+  const setorTable = setorRows.length ? `<div class="card"><div class="card-title">Pendências por setor <small>tempo médio e +${PROTO_DIAS_ALERTA} dias consideram só o corrente</small></div>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>Setor</th><th>Corrente</th><th>Legado</th><th>Total</th><th>Aguardando (corrente)</th><th>+${PROTO_DIAS_ALERTA} dias (corrente)</th><th>Tempo médio (corrente)</th></tr></thead>
+    <tbody>${setorRows.map(r=>`<tr><td><b>${esc(r.s)}</b>${r.s==="Chatbot" ? ` <span class="pill pill-gray">fechamento via banco</span>` : ""}</td><td><b>${fmtNum(r.corr)}</b></td><td>${fmtNum(r.leg)}</td><td>${fmtNum(r.total)}</td><td>${fmtNum(r.aguard)}</td>
+      <td>${r.corr ? `<span style="color:${riskColor(r.mais30/r.corr,0.2,0.5,true)};font-weight:700;">${fmtNum(r.mais30)} (${fmtPct(r.mais30/r.corr)})</span>` : "—"}</td>
+      <td>${isFinite(r.media) ? fmtNum(r.media,1)+" dias" : "—"}</td></tr>`).join("")}</tbody></table></div></div>` : "";
+
+  /* Tabela por agente (recorte selecionado) */
+  const byAg = groupBy(rows, r=>r.agente||"—");
+  const agRows = Array.from(byAg.entries()).map(([a, rs])=>{
+    const x = protoResumo(rs);
+    return [a, esc(rs[0].setor), `<b>${fmtNum(x.total)}</b>`, fmtNum(x.aguardando), fmtNum(x.mais30), isFinite(x.maisAntigo) ? fmtNum(x.maisAntigo)+" dias" : "—", x.total];
+  }).sort((a,b)=>b[6]-a[6]).map(r=>r.slice(0,6));
+  const agTable = rankingTableCard(`Pendências por agente <small>recorte ${scopeNome}</small>`, ["Agente","Setor","Em aberto","Aguardando",`+${PROTO_DIAS_ALERTA} dias`,"Mais antigo"], agRows, {boldFirst:true, limit:20});
+
+  /* Evolução entre extrações */
+  const evol = protoEvolucao();
+  let evolHtml = "";
+  if(evol.length){
+    const linhas = evol.map(e=>`<tr><td><b>${fmtDate(e.data)}</b></td><td>${e.corte ? `<span class="pill pill-gray">Marco zero</span>` : `<span class="pill pill-purple">Conferência</span>`}</td>
+      <td>${e.corte ? "—" : fmtNum(e.anterior)}</td><td>${e.corte ? "—" : fmtNum(e.novos)}</td>
+      <td>${e.corte ? "—" : `<b>${fmtNum(e.fechados)}</b>`}</td>
+      <td>${e.corte ? "—" : fmtNum(e.fechCorr)}</td><td>${e.corte ? "—" : fmtNum(e.fechLeg)}</td>
+      <td>${e.corte ? "—" : fmtNum(e.tin)+" / "+fmtNum(e.tout)}</td>
+      <td><b>${fmtNum(e.saldo)}</b></td><td>${isFinite(e.taxa) ? fmtPct(e.taxa) : "—"}</td></tr>`).join("");
+    const semConferencia = evol.every(e=>e.corte);
+    evolHtml = `<div class="section-title"><span class="chev">›</span> Evolução entre extrações</div>
+    ${semConferencia ? `<p class="proto-note">Por enquanto só existe a extração de marco zero. Os números de <b>novos</b>, <b>fechados</b> e <b>taxa de fechamento</b> aparecem aqui a partir da próxima extração colada na planilha.</p>` : ""}
+    <div class="grid-auto">
+    ${evol.filter(e=>!e.corte).length>=1 && evol.length>=2 ? chartCard("Saldo, novos e fechados por extração","chartProtoEvol",{wide:true,height:300}) : ""}
+    <div class="card card-wide"><div class="card-title">Movimento por extração <small>considera corrente + legado</small></div>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>Extração</th><th>Tipo</th><th>Saldo anterior</th><th>Novos</th><th>Fechados</th><th>Fechados corrente</th><th>Fechados legado</th><th>Transferidos (entrada / saída)</th><th>Saldo atual</th><th>Taxa de fechamento</th></tr></thead>
+    <tbody>${linhas}</tbody></table></div></div>
+    ${protoEvolSetorCard(evol)}
+    </div>`;
+  }
+
+  return `<p class="proto-note">Posição da extração de <b>${fmtDate(ext)}</b>. Esta lista não é em tempo real: o protocolo é encerrado no sistema de atendimento e sai daqui na extração seguinte.
+    Protocolos do setor <b>Chatbot</b> são encerrados via banco de dados, por solicitação.</p>
+  <div class="ranking-tabs">${scopeTabs.map(t=>`<button class="rtab ${protoUI.scope===t.key?'active':''}" data-proto-scope="${t.key}">${t.label}</button>`).join("")}</div>
+  <div class="section-title"><span class="chev">›</span> Indicadores de protocolos</div><div class="kpi-grid">${kpis.join("")}</div>
+  ${cards.length ? `<div class="section-title"><span class="chev">›</span> Perfil das pendências <small style="font-weight:500;color:var(--text-muted);">recorte ${scopeNome}</small></div><div class="grid-auto">${cards.join("")}</div>` : ""}
+  <div class="section-title"><span class="chev">›</span> Pendências por setor e agente</div><div class="grid-auto">${setorTable}${agTable}</div>
+  ${evolHtml}
+  <div class="section-title"><span class="chev">›</span> Fila de protocolos pendentes <small style="font-weight:500;color:var(--text-muted);">recorte ${scopeNome}, do mais antigo para o mais novo</small></div>
+  <div class="card">
+    <div class="proto-controls">
+      <input type="text" class="filter-select proto-search" id="pqBusca" placeholder="Buscar por número, agente ou categoria" value="${esc(protoUI.busca)}">
+      <select class="filter-select" id="pqStatus"></select>
+      <select class="filter-select" id="pqCategoria"></select>
+      <select class="filter-select" id="pqFaixa"></select>
+      <select class="filter-select" id="pqAgente"></select>
+      <button class="btn btn-ghost btn-sm" id="pqExport">⬇ Exportar (CSV)</button>
+    </div>
+    <div id="protoQueueBody"></div>
+  </div>`;
+}
+function protoEvolSetorCard(evol){
+  const ult = evol[evol.length-1];
+  if(!ult || ult.corte || ult.setores.length<2) return "";
+  const linhas = ult.setores.slice().sort((a,b)=>(b._saldo||0)-(a._saldo||0)).map(r=>{
+    const base = (r._anterior||0)+(r._novos||0)+(r._tin||0);
+    const taxa = base>0 ? (r._fechados||0)/base : NaN;
+    return `<tr><td><b>${esc(r.setor)}</b></td><td>${fmtNum(r._anterior||0)}</td><td>${fmtNum(r._novos||0)}</td><td><b>${fmtNum(r._fechados||0)}</b></td>
+      <td>${fmtNum(r._tin||0)} / ${fmtNum(r._tout||0)}</td><td><b>${fmtNum(r._saldo||0)}</b></td>
+      <td>${isFinite(taxa) ? `<span style="color:${riskColor(taxa,0.5,0.2)};font-weight:700;">${fmtPct(taxa)}</span>` : "—"}</td></tr>`;
+  }).join("");
+  return `<div class="card card-wide"><div class="card-title">Movimento por setor na extração de ${fmtDate(ult.data)}</div>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>Setor</th><th>Saldo anterior</th><th>Novos</th><th>Fechados</th><th>Transferidos (entrada / saída)</th><th>Saldo atual</th><th>Taxa de fechamento</th></tr></thead>
+    <tbody>${linhas}</tbody></table></div></div>`;
+}
+
+/* ---------- Fila ---------- */
+function protoQueueRows(){
+  const q = protoUI.busca.trim().toLowerCase();
+  return protoScoped(protoBase()).filter(r=>{
+    if(protoUI.status!=="all" && r._status!==protoUI.status) return false;
+    if(protoUI.categoria!=="all" && (r.categoria||"—")!==protoUI.categoria) return false;
+    if(protoUI.agente!=="all" && (r.agente||"—")!==protoUI.agente) return false;
+    if(protoUI.faixa!=="all"){ const f = protoFaixaOf(r._dias); if(!f || f.key!==protoUI.faixa) return false; }
+    if(q && !(String(r.numero||"").toLowerCase().includes(q) || String(r.agente||"").toLowerCase().includes(q) || String(r.categoria||"").toLowerCase().includes(q))) return false;
+    return true;
+  }).sort((a,b)=>(isFinite(b._dias)?b._dias:-1)-(isFinite(a._dias)?a._dias:-1) || ((a._date?a._date.getTime():0)-(b._date?b._date.getTime():0)));
+}
+function fillProtoQueueSelects(){
+  const rows = protoScoped(protoBase());
+  const uniq = fn => Array.from(new Set(rows.map(fn))).sort((a,b)=>String(a).localeCompare(String(b),'pt-BR'));
+  const fill = (id, allLabel, options, key) => {
+    const el = document.getElementById(id); if(!el) return;
+    if(protoUI[key]!=="all" && !options.some(o=>o.value===protoUI[key])) protoUI[key] = "all";
+    el.innerHTML = `<option value="all">${allLabel}</option>` + options.map(o=>`<option value="${esc(o.value)}">${esc(o.label)}</option>`).join("");
+    el.value = protoUI[key];
+    el.addEventListener('change', e=>{ protoUI[key] = e.target.value; protoUI.page = 0; updateProtoQueueBody(); });
+  };
+  fill('pqStatus', "Todos os status", uniq(r=>r._status||"—").map(s=>({value:s, label:s==="AGUARDANDO"?"Aguardando":s==="ANDAMENTO"?"Em andamento":s})), 'status');
+  fill('pqCategoria', "Todas as categorias", uniq(r=>r.categoria||"—").map(s=>({value:s, label:s})), 'categoria');
+  fill('pqFaixa', "Qualquer tempo em aberto", PROTO_FAIXAS.map(f=>({value:f.key, label:f.label})), 'faixa');
+  fill('pqAgente', "Todos os agentes", uniq(r=>r.agente||"—").map(s=>({value:s, label:s})), 'agente');
+}
+function updateProtoQueueBody(){
+  const box = document.getElementById('protoQueueBody'); if(!box) return;
+  const rows = protoQueueRows();
+  const pages = Math.max(1, Math.ceil(rows.length/PROTO_PAGE_SIZE));
+  if(protoUI.page>=pages) protoUI.page = pages-1;
+  const start = protoUI.page*PROTO_PAGE_SIZE;
+  const slice = rows.slice(start, start+PROTO_PAGE_SIZE);
+  const showSetor = state.filters.setor==="all";
+  box.innerHTML = `<div class="proto-count">${fmtNum(rows.length)} ${rows.length===1?"protocolo":"protocolos"}${rows.length ? ` · mostrando ${fmtNum(start+1)} a ${fmtNum(start+slice.length)}` : ""}</div>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>Protocolo</th><th>Status</th><th>Criado em</th><th>Em aberto há</th><th>Agente</th>${showSetor?"<th>Setor</th>":""}<th>Categoria</th><th>Como fechar</th></tr></thead>
+    <tbody>${slice.length ? slice.map(r=>`<tr><td><b>${esc(r.numero||"—")}</b></td><td>${protoStatusPill(r._status)}</td><td>${fmtDateTime(r._date)}</td><td>${protoDiasPill(r._dias)}</td>
+      <td>${esc(r.agente||"—")}</td>${showSetor?`<td>${esc(r.setor)}</td>`:""}<td>${esc(r.categoria||"—")}</td>
+      <td style="color:var(--text-muted);">${r.setor==="Chatbot" ? "Via banco, por solicitação" : "No sistema de atendimento"}</td></tr>`).join("")
+      : `<tr><td colspan="8" style="color:var(--text-muted);padding:22px 12px;">Nenhum protocolo pendente com esses filtros.</td></tr>`}</tbody></table></div>
+    ${pages>1 ? `<div class="proto-pager"><button class="btn btn-ghost btn-sm" id="pqPrev" ${protoUI.page===0?"disabled":""}>‹ Anterior</button>
+      <span>Página ${fmtNum(protoUI.page+1)} de ${fmtNum(pages)}</span>
+      <button class="btn btn-ghost btn-sm" id="pqNext" ${protoUI.page>=pages-1?"disabled":""}>Próxima ›</button></div>` : ""}`;
+  document.getElementById('pqPrev')?.addEventListener('click', ()=>{ protoUI.page--; updateProtoQueueBody(); });
+  document.getElementById('pqNext')?.addEventListener('click', ()=>{ protoUI.page++; updateProtoQueueBody(); });
+}
+function exportProtoQueueCsv(){
+  const rows = protoQueueRows();
+  const cell = v => `"${String(v===null||v===undefined?"":v).replace(/"/g,'""')}"`;
+  const lines = [["numero_protocolo","status","criado_em","dias_em_aberto","agente","setor","categoria","recorte","data_extracao"].map(cell).join(";")];
+  const ext = fmtDate(protoExtracao());
+  rows.forEach(r=>{
+    lines.push([`="${String(r.numero||"").replace(/"/g,'')}"`, cell(r._status), cell(fmtDateTime(r._date)), isFinite(r._dias)?r._dias:"",
+      cell(r.agente), cell(r.setor), cell(r.categoria), cell(r._legado?"Legado":"Corrente"), cell(ext)].join(";"));
+  });
+  const blob = new Blob(["﻿"+lines.join("\r\n")], {type:"text/csv;charset=utf-8;"});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = "protocolos_pendentes_" + (state.filters.setor==="all" ? "todos" : state.filters.setor.replace(/[^\wÀ-ú]+/g,"_")) + ".csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+}
+function verticalBarChart(canvasId, labels, datasets, opts={}){
+  const canvas = document.getElementById(canvasId);
+  if(!canvas) return null;
+  try{
+    return new Chart(canvas.getContext('2d'), {
+      type:'bar',
+      data:{ labels, datasets: datasets.map(d=>({ label:d.label, data:d.data, backgroundColor:d.color, borderRadius:5, maxBarThickness:38, stack:opts.stacked?'s':undefined })) },
+      options:{ ...baseChartOpts(),
+        plugins:{ legend:{ display:datasets.length>1, position:'bottom', labels:{font:{size:11}, boxWidth:12} },
+          tooltip:{ callbacks:{ label:(ctx)=> `${ctx.dataset.label}: ${fmtNum(ctx.parsed.y)}` } } },
+        scales:{ x:{ stacked:!!opts.stacked, grid:{display:false}, ticks:{font:{size:10}} }, y:{ stacked:!!opts.stacked, grid:{color:'#F0F0F5'}, ticks:{font:{size:10}} } } }
+    });
+  }catch(err){ showChartError(canvasId, err); return null; }
+}
+function afterRenderProtocols(){
+  document.querySelectorAll('[data-proto-scope]').forEach(el=>{
+    el.addEventListener('click', ()=>{ protoUI.scope = el.dataset.protoScope; protoUI.page = 0; renderScreen(); });
+  });
+  if(!document.getElementById('protoQueueBody')) return;
+  const rows = protoScoped(protoBase());
+
+  if(document.getElementById('chartProtoFaixa')){
+    const counts = PROTO_FAIXAS.map(f=>rows.filter(r=>{ const x = protoFaixaOf(r._dias); return x && x.key===f.key; }).length);
+    charts.protoFaixa = horizontalBarChart('chartProtoFaixa', PROTO_FAIXAS.map(f=>f.label), counts, PROTO_FAIXAS.map(f=>f.color),
+      {tooltipFmt:(v)=>`${fmtNum(v)} protocolos (${rows.length ? fmtPct(v/rows.length) : "—"})`});
+  }
+  if(document.getElementById('chartProtoCategoria')){
+    const top = Array.from(groupBy(rows, r=>r.categoria||"—").entries()).map(([k,v])=>[k,v.length]).sort((a,b)=>b[1]-a[1]).slice(0,10);
+    charts.protoCat = horizontalBarChart('chartProtoCategoria', top.map(t=>t[0].length>34 ? t[0].slice(0,33)+"…" : t[0]), top.map(t=>t[1]), top.map((_,i)=>colorForIndex(i)),
+      {tooltipFmt:(v)=>`${fmtNum(v)} protocolos (${rows.length ? fmtPct(v/rows.length) : "—"})`});
+  }
+  if(document.getElementById('chartProtoMes')){
+    /* Últimos 12 meses com protocolos; o que for mais antigo vai agrupado na primeira barra. */
+    const byMes = new Map();
+    rows.forEach(r=>{ if(!r._date) return; const k = monthKeyISO(r._date); if(!byMes.has(k)) byMes.set(k, {ag:0, an:0, d:r._date}); const x = byMes.get(k); if(r._status==="AGUARDANDO") x.ag++; else x.an++; });
+    const keys = Array.from(byMes.keys()).sort();
+    const recentes = keys.slice(-12), antigos = keys.slice(0, -12);
+    const labels = [], an = [], ag = [];
+    if(antigos.length){ labels.push("Anteriores"); an.push(sum(antigos.map(k=>byMes.get(k).an))); ag.push(sum(antigos.map(k=>byMes.get(k).ag))); }
+    recentes.forEach(k=>{ const x = byMes.get(k); labels.push(monthLabelShort(x.d)); an.push(x.an); ag.push(x.ag); });
+    charts.protoMes = verticalBarChart('chartProtoMes', labels, [
+      {label:"Em andamento", data:an, color:'#7063F0'}, {label:"Aguardando", data:ag, color:'#FFA35C'} ], {stacked:true});
+  }
+  if(document.getElementById('chartProtoEvol')){
+    const evol = protoEvolucao();
+    charts.protoEvol = lineChart('chartProtoEvol', evol.map(e=>fmtDate(e.data)), [
+      {label:"Saldo em aberto", data:evol.map(e=>e.saldo), color:'#7063F0', fill:true},
+      {label:"Novos", data:evol.map(e=>e.corte?null:e.novos), color:'#FFA35C'},
+      {label:"Fechados", data:evol.map(e=>e.corte?null:e.fechados), color:'#1C1F26'} ]);
+  }
+
+  fillProtoQueueSelects();
+  const busca = document.getElementById('pqBusca');
+  if(busca) busca.addEventListener('input', e=>{ protoUI.busca = e.target.value; protoUI.page = 0; updateProtoQueueBody(); });
+  document.getElementById('pqExport')?.addEventListener('click', exportProtoQueueCsv);
+  updateProtoQueueBody();
+}
+function protoOverviewKpi(){
+  if(!hasSheetData('protocols')) return "";
+  const base = protoBase(); const corr = base.filter(r=>!r._legado);
+  const mais30 = corr.filter(r=>r._dias>PROTO_DIAS_ALERTA).length;
+  return kpiCard("Protocolos em aberto", fmtNum(corr.length),
+    `criados a partir de ${protoCorrenteLabel()} · ${fmtNum(mais30)} há mais de ${PROTO_DIAS_ALERTA} dias · legado ${fmtNum(base.length-corr.length)} · extração de ${fmtDate(protoExtracao())}`,
+    corr.length ? (mais30/corr.length<=0.2 ? `<span class="kpi-badge badge-good">bom</span>` : `<span class="kpi-badge badge-bad">atenção</span>`) : "");
+}
 function showLoading(text){ document.getElementById('loadingText').textContent = text; document.getElementById('loadingOverlay').style.display = 'flex'; }
 function hideLoading(){ document.getElementById('loadingOverlay').style.display = 'none'; }
 function showSyncIndicator(){ const el=document.getElementById('syncIndicator'); if(el) el.style.display='inline-flex'; }
 function hideSyncIndicator(){ const el=document.getElementById('syncIndicator'); if(el) el.style.display='none'; }
 function updateSidebarStatus(){
   const dot = document.getElementById('statusDot'); const text = document.getElementById('statusText');
-  const loaded = Object.keys(SHEETS).filter(k=>(state.raw[k]||[]).length>0);
+  const fontes = Object.keys(SHEETS).filter(k=>!SHEETS[k].optional);
+  const loaded = fontes.filter(k=>(state.raw[k]||[]).length>0);
   if(loaded.length===0){ dot.className='status-dot off'; text.textContent='Nenhum dado carregado'; }
-  else if(loaded.length<Object.keys(SHEETS).length){ dot.className='status-dot warn'; text.textContent=`${loaded.length}/${Object.keys(SHEETS).length} fontes com dados`; }
+  else if(loaded.length<fontes.length){ dot.className='status-dot warn'; text.textContent=`${loaded.length}/${fontes.length} fontes com dados`; }
   else { dot.className='status-dot'; text.textContent='Todas as fontes carregadas'; }
   const problemas = window._ultimosProblemasCarregamento;
   const footer = document.querySelector('.sidebar-footer');
@@ -1424,7 +1822,10 @@ const SUPABASE_TABLES = {
   chatPerf:     { table: "chat_performance", columns: { data:"data", agente:"agente", setor:"setor", conversasSat:"conversas_sat", satisfacaoMedia:"satisfacao_media", total:"total", tma:"tma", tmeResp:"tme_resposta" } },
   satisfaction: { table: "satisfacao", columns: { data:"data", agente:"agente", setor:"setor", canal:"canal", nota:"nota", resolucao:"resolucao", nps:"nps" } },
   monitoring:   { table: "monitoria", columns: { data:"data", agente:"agente", setor:"setor", nota:"nota", canal:"canal" } },
-  pause:        { table: "pausas", columns: { data:"data", agente:"agente", setor:"setor", tipo:"tipo", duracao:"duracao" } }
+  pause:        { table: "pausas", columns: { data:"data", agente:"agente", setor:"setor", tipo:"tipo", duracao:"duracao" } },
+  protocols:    { table: "protocolos", columns: { dataExtracao:"data_extracao", numero:"numero_protocolo", status:"status", criadoEm:"criado_em", agente:"agente", setor:"setor", categoria:"categoria" } },
+  protoSaldo:   { table: "protocolos_saldo", columns: { dataExtracao:"data_extracao", tipo:"tipo", setor:"setor", saldoAnterior:"saldo_anterior", novos:"novos", transfEntrada:"transferidos_entrada", transfSaida:"transferidos_saida", fechados:"fechados", saldoAtual:"saldo_atual", pendentes30:"pendentes_mais_30_dias", tempoMedio:"tempo_medio_em_aberto_dias", taxaFechamento:"taxa_fechamento" } },
+  protoMov:     { table: "protocolos_movimento", columns: { dataExtracao:"data_extracao", numero:"numero_protocolo", movimento:"movimento", setor:"setor", setorAnterior:"setor_anterior", agente:"agente", categoria:"categoria", criadoEm:"criado_em", diasEmAberto:"dias_em_aberto" } }
 };
 
 let loadGeneration = 0;
@@ -1489,6 +1890,7 @@ async function fetchPageKeysetWithRetry(table, afterId, pageSize, retries){
       return data || [];
     }catch(e){
       lastError = e;
+      if(e && (e.code==="PGRST205" || e.code==="42P01")) break; // tabela ainda não criada: não adianta tentar de novo
       if(attempt < retries) await new Promise(r=>setTimeout(r, 700*(attempt+1)));
     }
   }
@@ -1532,7 +1934,7 @@ async function loadAllFromSupabase(useLoadingOverlay){
       state.mapping[key] = cfg.columns;
       normalizeSheet(key);
       idbSet(key, { rows, ts: Date.now() });
-      if(failedPages > 0){
+      if(failedPages > 0 && !(SHEETS[key]?.optional && rows.length===0)){
         problemas.push((SHEETS[key]?.label || cfg.table) + ": " + failedPages + " parte(s) não carregou(aram), tente 'Atualizar dados'.");
       }
     }catch(e){
