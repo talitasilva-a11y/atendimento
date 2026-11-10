@@ -1445,7 +1445,7 @@ function afterRenderPause(){
    PROTOCOLOS
    A tabela "protocolos" traz a foto dos protocolos em aberto na última extração.
    Corrente = criados depois de PROTO_LEGADO_ATE; Legado = criados até essa data.
-   O fechamento é feito no sistema de atendimento: o protocolo sai da lista na
+   O fechamento é feito no Gestor: o protocolo sai da lista na
    extração seguinte e entra como "Fechado" na evolução entre extrações.
    ============================================================ */
 const PROTO_FAIXAS = [
@@ -1561,7 +1561,7 @@ function renderProtocols(){
   const pct = v => res.total ? fmtPct(v/res.total) : "—";
   const kpis = [
     kpiCard("Em aberto · corrente", fmtNum(corr.length), `criados a partir de ${protoCorrenteLabel()}`),
-    kpiCard("Em aberto · legado", fmtNum(leg.length), `criados até ${protoLegadoLabel()}`),
+    kpiCard("Em aberto · legado", fmtNum(leg.length), `criados até ${protoLegadoLabel()} · fechamento via banco`),
     kpiCard("Total em aberto", fmtNum(base.length), "corrente + legado"),
     kpiCard("Aguardando", fmtNum(res.aguardando), `${pct(res.aguardando)} do recorte ${scopeNome}`),
     kpiCard("Em andamento", fmtNum(res.andamento), `${pct(res.andamento)} do recorte ${scopeNome}`),
@@ -1620,8 +1620,8 @@ function renderProtocols(){
     </div>`;
   }
 
-  return `<p class="proto-note">Posição da extração de <b>${fmtDate(ext)}</b>. Esta lista não é em tempo real: o protocolo é encerrado no sistema de atendimento e sai daqui na extração seguinte.
-    Protocolos do setor <b>Chatbot</b> são encerrados via banco de dados, por solicitação.</p>
+  return `<p class="proto-note">Posição da extração de <b>${fmtDate(ext)}</b>. Esta lista não é em tempo real: o protocolo é encerrado no Gestor e sai daqui na extração seguinte.
+    Protocolos criados até <b>${protoLegadoLabel()}</b> (legado) e os do setor <b>Chatbot</b> são encerrados via banco de dados.</p>
   <div class="ranking-tabs">${scopeTabs.map(t=>`<button class="rtab ${protoUI.scope===t.key?'active':''}" data-proto-scope="${t.key}">${t.label}</button>`).join("")}</div>
   <div class="section-title"><span class="chev">›</span> Indicadores de protocolos</div><div class="kpi-grid">${kpis.join("")}</div>
   ${cards.length ? `<div class="section-title"><span class="chev">›</span> Perfil das pendências <small style="font-weight:500;color:var(--text-muted);">recorte ${scopeNome}</small></div><div class="grid-auto">${cards.join("")}</div>` : ""}
@@ -1694,7 +1694,7 @@ function updateProtoQueueBody(){
     <div class="table-wrap"><table class="data-table"><thead><tr><th>Protocolo</th><th>Status</th><th>Criado em</th><th>Em aberto há</th><th>Agente</th>${showSetor?"<th>Setor</th>":""}<th>Categoria</th><th>Como fechar</th></tr></thead>
     <tbody>${slice.length ? slice.map(r=>`<tr><td><b>${esc(r.numero||"—")}</b></td><td>${protoStatusPill(r._status)}</td><td>${fmtDateTime(r._date)}</td><td>${protoDiasPill(r._dias)}</td>
       <td>${esc(r.agente||"—")}</td>${showSetor?`<td>${esc(r.setor)}</td>`:""}<td>${esc(r.categoria||"—")}</td>
-      <td style="color:var(--text-muted);">${r.setor==="Chatbot" ? "Via banco, por solicitação" : "No sistema de atendimento"}</td></tr>`).join("")
+      <td style="color:var(--text-muted);">${r.setor==="Chatbot" ? "Via banco, por solicitação" : (r._legado ? "Via banco (legado)" : "No Gestor")}</td></tr>`).join("")
       : `<tr><td colspan="8" style="color:var(--text-muted);padding:22px 12px;">Nenhum protocolo pendente com esses filtros.</td></tr>`}</tbody></table></div>
     ${pages>1 ? `<div class="proto-pager"><button class="btn btn-ghost btn-sm" id="pqPrev" ${protoUI.page===0?"disabled":""}>‹ Anterior</button>
       <span>Página ${fmtNum(protoUI.page+1)} de ${fmtNum(pages)}</span>
