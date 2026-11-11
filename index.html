@@ -1496,13 +1496,12 @@ function protoScoped(rows){
 }
 function protoResumo(rows){
   const dias = rows.map(r=>r._dias).filter(isFinite).sort((a,b)=>a-b);
-  const mediana = dias.length ? (dias.length%2 ? dias[(dias.length-1)/2] : (dias[dias.length/2-1]+dias[dias.length/2])/2) : NaN;
   return {
     total: rows.length,
     aguardando: rows.filter(r=>r._status==="AGUARDANDO").length,
     andamento: rows.filter(r=>r._status==="ANDAMENTO").length,
     mais30: rows.filter(r=>r._dias>PROTO_DIAS_ALERTA).length,
-    media: avg(dias), mediana,
+    media: avg(dias),
     maisAntigo: dias.length ? dias[dias.length-1] : NaN
   };
 }
@@ -1570,7 +1569,7 @@ function renderProtocols(){
     kpiCard(`Pendentes há mais de ${PROTO_DIAS_ALERTA} dias`, fmtNum(res.mais30), `${pct(res.mais30)} do recorte ${scopeNome}`,
       res.total ? (res.mais30/res.total<=0.2 ? `<span class="kpi-badge badge-good">bom</span>` : `<span class="kpi-badge badge-bad">atenção</span>`) : ""),
     kpiCard("Tempo médio em aberto", isFinite(res.media) ? fmtNum(res.media,1)+" dias" : "—",
-      isFinite(res.mediana) ? `mediana ${fmtNum(res.mediana)} dias · mais antigo ${fmtNum(res.maisAntigo)} dias` : ""),
+      isFinite(res.maisAntigo) ? `média do recorte ${scopeNome} · mais antigo ${fmtNum(res.maisAntigo)} dias` : ""),
   ];
 
   const cards = [];
