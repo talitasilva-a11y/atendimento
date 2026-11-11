@@ -391,8 +391,6 @@ const SHEETS = {
   protoMov: { label: "Movimento de Protocolos", optional:true, fields: [
     {key:"dataExtracao"},{key:"numero"},{key:"movimento"},{key:"setor"},{key:"setorAnterior"},{key:"agente"},{key:"categoria"},{key:"criadoEm"},{key:"diasEmAberto"} ] }
 };
-/* Protocolos criados até esta data são "legado"; depois dela, "corrente". */
-const PROTO_LEGADO_ATE = new Date(2026, 8, 30, 23, 59, 59);
 function diffDays(de, ate){
   if(!de || !ate) return NaN;
   const a = new Date(ate.getFullYear(), ate.getMonth(), ate.getDate());
@@ -485,7 +483,6 @@ const SHEET_ENRICHERS = {
     r.setor=String(r.setor||"").trim()||"Sem setor";
     r._status=String(r.status||"").trim().toUpperCase();
     r._dias=diffDays(r._date, r._ext);
-    r._legado=!!(r._date && r._date<=PROTO_LEGADO_ATE);
   },
   protoSaldo: r=>{
     r._ext=parseDateFlexible(r.dataExtracao); r.setor=String(r.setor||"").trim()||"Sem setor";
@@ -496,7 +493,6 @@ const SHEET_ENRICHERS = {
   protoMov: r=>{
     r._ext=parseDateFlexible(r.dataExtracao); r._date=parseDateFlexible(r.criadoEm);
     r.setor=String(r.setor||"").trim()||"Sem setor";
-    r._legado=!!(r._date && r._date<=PROTO_LEGADO_ATE);
   },
 };
 function normalizeSheet(key){
@@ -1219,9 +1215,9 @@ function renderSector(){
     const satisfacaoM=computeSatisfacao(satRows); const resolucaoM=computeResolucao(satRows); const npsM=computeNps(satRows);
     const mon=computeMonitoria(byMonSetor.get(s)||[]);
     const pauseTotal=sum((byPauseSetor.get(s)||[]).map(r=>r._sec)); const volume=(byRecSetor.get(s)||[]).length+(byMadeSetor.get(s)||[]).length+chatCount;
-    const protoRows=byProtoSetor.get(s)||[]; const protoCorr=protoRows.filter(r=>!r._legado);
+    const protoRows=byProtoSetor.get(s)||[];
     return {setor:s,volume,...rm,tmaComb:avg([rm.tma,mm.tma].filter(isFinite)),
-      protoCorr:protoCorr.length, protoMais30:protoCorr.filter(r=>r._dias>PROTO_DIAS_ALERTA).length, protoLeg:protoRows.length-protoCorr.length,
+      protoAbertos:protoRows.length, protoMais30:protoRows.filter(r=>r._dias>PROTO_DIAS_ALERTA).length,
       satisfacaoPct:satisfacaoM.pct, satisfacaoTotal:satisfacaoM.total,
       resolucaoPct:resolucaoM.pct, resolucaoTotal:resolucaoM.total,
       npsPct:npsM.pct, npsTotal:npsM.total,
@@ -1237,9 +1233,8 @@ function renderSector(){
     {show:hasNpsAny,label:"NPS",render:r=>fmtPct(r.npsPct)},
     {show:hasMon,label:"Nota Monitoria",render:r=>fmtPct(r.notaMon)},
     {show:hasPause,label:"Tempo em Pausa",render:r=>fmtSec(r.pauseTotal)},
-    {show:hasProto,label:"Protocolos abertos",render:r=>`<b>${fmtNum(r.protoCorr)}</b>`},
-    {show:hasProto,label:"Protocolos +30 dias",render:r=>r.protoCorr?`<span style="color:${riskColor(r.protoMais30/r.protoCorr,0.2,0.5,true)};font-weight:700;">${fmtNum(r.protoMais30)}</span>`:"—"},
-    {show:hasProto,label:"Protocolos legado",render:r=>fmtNum(r.protoLeg)},
+    {show:hasProto,label:"Protocolos abertos",render:r=>`<b>${fmtNum(r.protoAbertos)}</b>`},
+    {show:hasProto,label:"Protocolos +30 dias",render:r=>r.protoAbertos?`<span style="color:${riskColor(r.protoMais30/r.protoAbertos,0.2,0.5,true)};font-weight:700;">${fmtNum(r.protoMais30)}</span>`:"—"},
   ].filter(c=>c.always||c.show);
   const cards=[];
   if(hasResolucaoAny){ const hasData = rows.some(r=>r.resolucaoTotal>0); if(hasData) cards.push(chartCard("Ranking de resolução por setor","chartResolucaoSetorDetail")); }
@@ -1249,9 +1244,9 @@ function renderSector(){
   <div class="section-title"><span class="chev">›</span> Detalhamento por setor</div>
   <div class="card"><div class="table-wrap"><table class="data-table" id="tblSector">
     <thead><tr>${columns.map(c=>`<th>${c.label}</th>`).join("")}</tr></thead>
-    <tbody>${rows.filter(r=>r.volume>0 || setores.length===1 || (r.protoCorr+r.protoLeg)>0).map(r=>`<tr>${columns.map(c=>`<td>${c.render(r)}</td>`).join("")}</tr>`).join("")}</tbody>
+    <tbody>${rows.filter(r=>r.volume>0 || setores.length===1 || r.protoAbertos>0).map(r=>`<tr>${columns.map(c=>`<td>${c.render(r)}</td>`).join("")}</tr>`).join("")}</tbody>
   </table></div></div>
-  ${hasProto ? `<p class="kpi-sub" style="margin-top:10px;">As colunas de protocolos mostram a posição da extração de <b>${fmtDate(protoExtracao())}</b> e não mudam com o filtro de mês. "Abertos" e "+30 dias" consideram só os criados a partir de ${protoCorrenteLabel()}; os anteriores ficam em "legado".</p>` : ""}`;
+  ${hasProto ? `<p class="kpi-sub" style="margin-top:10px;">As colunas de protocolos mostram a posição da extração de <b>${fmtDate(protoExtracao())}</b> e não mudam com o filtro de mês. O tempo em aberto é contado desde a criação do protocolo.</p>` : ""}`;
 }
 function afterRenderSector(){
   const received=getReceivedFiltered(), made=getMadeFiltered();
@@ -1446,7 +1441,7 @@ function afterRenderPause(){
 /* ============================================================
    PROTOCOLOS
    A tabela "protocolos" traz a foto dos protocolos em aberto na última extração.
-   Corrente = criados depois de PROTO_LEGADO_ATE; Legado = criados até essa data.
+   Tudo o que está na extração é pendência do setor, seja qual for a data de criação.
    O fechamento é feito no Gestor: o protocolo sai da lista na
    extração seguinte e entra como "Fechado" na evolução entre extrações.
    ============================================================ */
@@ -1458,7 +1453,7 @@ const PROTO_FAIXAS = [
 ];
 const PROTO_DIAS_ALERTA = 30;
 const PROTO_PAGE_SIZE = 50;
-let protoUI = {scope:"corrente", status:"all", categoria:"all", faixa:"all", agente:"all", busca:"", page:0};
+let protoUI = {status:"all", categoria:"all", faixa:"all", agente:"all", busca:"", page:0};
 
 function protoFaixaOf(dias){
   if(!isFinite(dias)) return null;
@@ -1466,8 +1461,6 @@ function protoFaixaOf(dias){
 }
 function fmtDate(d){ return d ? String(d.getDate()).padStart(2,'0')+"/"+String(d.getMonth()+1).padStart(2,'0')+"/"+d.getFullYear() : "—"; }
 function fmtDateTime(d){ return d ? fmtDate(d)+" "+String(d.getHours()).padStart(2,'0')+":"+String(d.getMinutes()).padStart(2,'0') : "—"; }
-function protoLegadoLabel(){ return fmtDate(PROTO_LEGADO_ATE); }
-function protoCorrenteLabel(){ const d = new Date(PROTO_LEGADO_ATE.getTime()+1000); return fmtDate(d); }
 
 /* Só a extração mais recente conta como "em aberto agora". */
 function protoLatest(){
@@ -1489,10 +1482,6 @@ function protoSetores(){
 function protoBase(){
   const f = state.filters.setor;
   return f==="all" ? protoLatest() : protoLatest().filter(r=>r.setor===f);
-}
-function protoScoped(rows){
-  if(protoUI.scope==="todos") return rows;
-  return rows.filter(r=> protoUI.scope==="legado" ? r._legado : !r._legado);
 }
 function protoResumo(rows){
   const dias = rows.map(r=>r._dias).filter(isFinite).sort((a,b)=>a-b);
@@ -1519,21 +1508,15 @@ function protoDiasPill(dias){
 function protoEvolucao(){
   const f = state.filters.setor;
   const saldo = (state.rows.protoSaldo||[]).filter(r=>r._ext && (f==="all" || r.setor===f));
-  const mov = (state.rows.protoMov||[]).filter(r=>r._ext && (f==="all" || r.setor===f));
   const byExt = new Map();
   saldo.forEach(r=>{
     const k = r._ext.getTime();
-    if(!byExt.has(k)) byExt.set(k, {data:r._ext, corte:true, anterior:0, novos:0, tin:0, tout:0, fechados:0, saldo:0, fechCorr:0, fechLeg:0, setores:[]});
+    if(!byExt.has(k)) byExt.set(k, {data:r._ext, corte:true, anterior:0, novos:0, tin:0, tout:0, fechados:0, saldo:0, setores:[]});
     const e = byExt.get(k);
     if(String(r.tipo||"").toLowerCase().indexOf("corte")===-1) e.corte = false;
     e.anterior += r._anterior||0; e.novos += r._novos||0; e.tin += r._tin||0; e.tout += r._tout||0;
     e.fechados += r._fechados||0; e.saldo += r._saldo||0;
     e.setores.push(r);
-  });
-  mov.forEach(r=>{
-    const e = byExt.get(r._ext.getTime());
-    if(!e || String(r.movimento||"").toLowerCase()!=="fechado") return;
-    if(r._legado) e.fechLeg++; else e.fechCorr++;
   });
   return Array.from(byExt.values()).sort((a,b)=>a.data-b.data).map(e=>{
     const base = e.anterior + e.novos + e.tin;
@@ -1550,26 +1533,17 @@ function renderProtocols(){
       <p>Os protocolos aparecem aqui depois que a planilha enviar a primeira extração para o painel.</p></div>`;
   }
   const base = protoBase();
-  const rows = protoScoped(base);
-  const corr = base.filter(r=>!r._legado), leg = base.filter(r=>r._legado);
+  const rows = base;
   const res = protoResumo(rows);
-  const scopeTabs = [
-    {key:"corrente", label:`Corrente (${fmtNum(corr.length)})`},
-    {key:"legado", label:`Legado (${fmtNum(leg.length)})`},
-    {key:"todos", label:`Todos (${fmtNum(base.length)})`},
-  ];
-  const scopeNome = protoUI.scope==="corrente" ? "corrente" : protoUI.scope==="legado" ? "legado" : "corrente + legado";
   const pct = v => res.total ? fmtPct(v/res.total) : "—";
   const kpis = [
-    kpiCard("Em aberto · corrente", fmtNum(corr.length), `criados a partir de ${protoCorrenteLabel()}`),
-    kpiCard("Em aberto · legado", fmtNum(leg.length), `criados até ${protoLegadoLabel()} · fechamento via banco`),
-    kpiCard("Total em aberto", fmtNum(base.length), "corrente + legado"),
-    kpiCard("Aguardando", fmtNum(res.aguardando), `${pct(res.aguardando)} do recorte ${scopeNome}`),
-    kpiCard("Em andamento", fmtNum(res.andamento), `${pct(res.andamento)} do recorte ${scopeNome}`),
-    kpiCard(`Pendentes há mais de ${PROTO_DIAS_ALERTA} dias`, fmtNum(res.mais30), `${pct(res.mais30)} do recorte ${scopeNome}`,
+    kpiCard("Protocolos em aberto", fmtNum(res.total), "em andamento + aguardando"),
+    kpiCard("Em andamento", fmtNum(res.andamento), `${pct(res.andamento)} do total em aberto`),
+    kpiCard("Aguardando", fmtNum(res.aguardando), `${pct(res.aguardando)} do total em aberto`),
+    kpiCard(`Pendentes há mais de ${PROTO_DIAS_ALERTA} dias`, fmtNum(res.mais30), `${pct(res.mais30)} do total em aberto`,
       res.total ? (res.mais30/res.total<=0.2 ? `<span class="kpi-badge badge-good">bom</span>` : `<span class="kpi-badge badge-bad">atenção</span>`) : ""),
     kpiCard("Tempo médio em aberto", isFinite(res.media) ? fmtNum(res.media,1)+" dias" : "—",
-      isFinite(res.maisAntigo) ? `média do recorte ${scopeNome} · mais antigo ${fmtNum(res.maisAntigo)} dias` : ""),
+      isFinite(res.maisAntigo) ? `contado desde a criação · mais antigo ${fmtNum(res.maisAntigo)} dias` : ""),
   ];
 
   const cards = [];
@@ -1579,17 +1553,17 @@ function renderProtocols(){
     cards.push(chartCard("Protocolos em aberto por mês de criação","chartProtoMes",{wide:true}));
   }
 
-  /* Tabela por setor: sempre mostra corrente e legado lado a lado */
+  /* Tabela por setor */
   const bySetor = groupBy(base, r=>r.setor);
   const setorRows = Array.from(bySetor.entries()).map(([s, rs])=>{
-    const c = rs.filter(r=>!r._legado); const rc = protoResumo(c);
-    return {s, total:rs.length, corr:c.length, leg:rs.length-c.length, aguard:rc.aguardando, mais30:rc.mais30, media:rc.media};
-  }).sort((a,b)=>b.corr-a.corr || b.total-a.total);
-  const setorTable = setorRows.length ? `<div class="card"><div class="card-title">Pendências por setor <small>tempo médio e +${PROTO_DIAS_ALERTA} dias consideram só o corrente</small></div>
-    <div class="table-wrap"><table class="data-table"><thead><tr><th>Setor</th><th>Corrente</th><th>Legado</th><th>Total</th><th>Aguardando (corrente)</th><th>+${PROTO_DIAS_ALERTA} dias (corrente)</th><th>Tempo médio (corrente)</th></tr></thead>
-    <tbody>${setorRows.map(r=>`<tr><td><b>${esc(r.s)}</b>${r.s==="Chatbot" ? ` <span class="pill pill-gray">fechamento via banco</span>` : ""}</td><td><b>${fmtNum(r.corr)}</b></td><td>${fmtNum(r.leg)}</td><td>${fmtNum(r.total)}</td><td>${fmtNum(r.aguard)}</td>
-      <td>${r.corr ? `<span style="color:${riskColor(r.mais30/r.corr,0.2,0.5,true)};font-weight:700;">${fmtNum(r.mais30)} (${fmtPct(r.mais30/r.corr)})</span>` : "—"}</td>
-      <td>${isFinite(r.media) ? fmtNum(r.media,1)+" dias" : "—"}</td></tr>`).join("")}</tbody></table></div></div>` : "";
+    const x = protoResumo(rs);
+    return {s, total:x.total, andamento:x.andamento, aguard:x.aguardando, mais30:x.mais30, media:x.media, maisAntigo:x.maisAntigo};
+  }).sort((a,b)=>b.total-a.total);
+  const setorTable = setorRows.length ? `<div class="card"><div class="card-title">Pendências por setor <small>tempo em aberto contado desde a criação</small></div>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>Setor</th><th>Em aberto</th><th>Em andamento</th><th>Aguardando</th><th>+${PROTO_DIAS_ALERTA} dias</th><th>Tempo médio</th><th>Mais antigo</th></tr></thead>
+    <tbody>${setorRows.map(r=>`<tr><td><b>${esc(r.s)}</b>${r.s==="Chatbot" ? ` <span class="pill pill-gray">fechamento via banco</span>` : ""}</td><td><b>${fmtNum(r.total)}</b></td><td>${fmtNum(r.andamento)}</td><td>${fmtNum(r.aguard)}</td>
+      <td>${r.total ? `<span style="color:${riskColor(r.mais30/r.total,0.2,0.5,true)};font-weight:700;">${fmtNum(r.mais30)} (${fmtPct(r.mais30/r.total)})</span>` : "—"}</td>
+      <td>${isFinite(r.media) ? fmtNum(r.media,1)+" dias" : "—"}</td><td>${isFinite(r.maisAntigo) ? fmtNum(r.maisAntigo)+" dias" : "—"}</td></tr>`).join("")}</tbody></table></div></div>` : "";
 
   /* Evolução entre extrações */
   const evol = protoEvolucao();
@@ -1598,29 +1572,27 @@ function renderProtocols(){
     const linhas = evol.map(e=>`<tr><td><b>${fmtDate(e.data)}</b></td><td>${e.corte ? `<span class="pill pill-gray">Marco zero</span>` : `<span class="pill pill-purple">Conferência</span>`}</td>
       <td>${e.corte ? "—" : fmtNum(e.anterior)}</td><td>${e.corte ? "—" : fmtNum(e.novos)}</td>
       <td>${e.corte ? "—" : `<b>${fmtNum(e.fechados)}</b>`}</td>
-      <td>${e.corte ? "—" : fmtNum(e.fechCorr)}</td><td>${e.corte ? "—" : fmtNum(e.fechLeg)}</td>
       <td>${e.corte ? "—" : fmtNum(e.tin)+" / "+fmtNum(e.tout)}</td>
       <td><b>${fmtNum(e.saldo)}</b></td><td>${isFinite(e.taxa) ? fmtPct(e.taxa) : "—"}</td></tr>`).join("");
     const semConferencia = evol.every(e=>e.corte);
     evolHtml = `<div class="section-title"><span class="chev">›</span> Evolução entre extrações</div>
-    ${semConferencia ? `<p class="proto-note">Por enquanto só existe a extração de marco zero. Os números de <b>novos</b>, <b>fechados</b> e <b>taxa de fechamento</b> aparecem aqui a partir da próxima extração colada na planilha.</p>` : ""}
+    ${semConferencia ? `<p class="proto-note">Por enquanto só existem extrações de marco zero. Os números de <b>novos</b>, <b>fechados</b> e <b>taxa de fechamento</b> aparecem aqui a partir da próxima extração colada na planilha.</p>` : ""}
     <div class="grid-auto">
     ${evol.filter(e=>!e.corte).length>=1 && evol.length>=2 ? chartCard("Saldo, novos e fechados por extração","chartProtoEvol",{wide:true,height:300}) : ""}
-    <div class="card card-wide"><div class="card-title">Movimento por extração <small>considera corrente + legado</small></div>
-    <div class="table-wrap"><table class="data-table"><thead><tr><th>Extração</th><th>Tipo</th><th>Saldo anterior</th><th>Novos</th><th>Fechados</th><th>Fechados corrente</th><th>Fechados legado</th><th>Transferidos (entrada / saída)</th><th>Saldo atual</th><th>Taxa de fechamento</th></tr></thead>
+    <div class="card card-wide"><div class="card-title">Movimento por extração <small>"Marco zero" registra só o saldo; fechamentos via banco não entram como produção</small></div>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>Extração</th><th>Tipo</th><th>Saldo anterior</th><th>Novos</th><th>Fechados</th><th>Transferidos (entrada / saída)</th><th>Saldo atual</th><th>Taxa de fechamento</th></tr></thead>
     <tbody>${linhas}</tbody></table></div></div>
     ${protoEvolSetorCard(evol)}
     </div>`;
   }
 
   return `<p class="proto-note">Posição da extração de <b>${fmtDate(ext)}</b>. Esta lista não é em tempo real: o protocolo é encerrado no Gestor e sai daqui na extração seguinte.
-    Protocolos criados até <b>${protoLegadoLabel()}</b> (legado) e os do setor <b>Chatbot</b> são encerrados via banco de dados.</p>
-  <div class="ranking-tabs">${scopeTabs.map(t=>`<button class="rtab ${protoUI.scope===t.key?'active':''}" data-proto-scope="${t.key}">${t.label}</button>`).join("")}</div>
+    Todo protocolo listado é pendência do setor, seja qual for a data de criação. Os do setor <b>Chatbot</b> são encerrados via banco de dados, por solicitação.</p>
   <div class="section-title"><span class="chev">›</span> Indicadores de protocolos</div><div class="kpi-grid">${kpis.join("")}</div>
-  ${cards.length ? `<div class="section-title"><span class="chev">›</span> Perfil das pendências <small style="font-weight:500;color:var(--text-muted);">recorte ${scopeNome}</small></div><div class="grid-auto">${cards.join("")}</div>` : ""}
+  ${cards.length ? `<div class="section-title"><span class="chev">›</span> Perfil das pendências</div><div class="grid-auto">${cards.join("")}</div>` : ""}
   <div class="section-title"><span class="chev">›</span> Pendências por setor</div>${setorTable}
   ${evolHtml}
-  <div class="section-title"><span class="chev">›</span> Fila de protocolos pendentes <small style="font-weight:500;color:var(--text-muted);">recorte ${scopeNome}, do mais antigo para o mais novo</small></div>
+  <div class="section-title"><span class="chev">›</span> Fila de protocolos pendentes <small style="font-weight:500;color:var(--text-muted);">do mais antigo para o mais novo</small></div>
   <div class="card">
     <div class="proto-controls">
       <input type="text" class="filter-select proto-search" id="pqBusca" placeholder="Buscar por número, agente ou categoria" value="${esc(protoUI.busca)}">
@@ -1651,7 +1623,7 @@ function protoEvolSetorCard(evol){
 /* ---------- Fila ---------- */
 function protoQueueRows(){
   const q = protoUI.busca.trim().toLowerCase();
-  return protoScoped(protoBase()).filter(r=>{
+  return protoBase().filter(r=>{
     if(protoUI.status!=="all" && r._status!==protoUI.status) return false;
     if(protoUI.categoria!=="all" && (r.categoria||"—")!==protoUI.categoria) return false;
     if(protoUI.agente!=="all" && (r.agente||"—")!==protoUI.agente) return false;
@@ -1661,7 +1633,7 @@ function protoQueueRows(){
   }).sort((a,b)=>(isFinite(b._dias)?b._dias:-1)-(isFinite(a._dias)?a._dias:-1) || ((a._date?a._date.getTime():0)-(b._date?b._date.getTime():0)));
 }
 function fillProtoQueueSelects(){
-  const rows = protoScoped(protoBase());
+  const rows = protoBase();
   const uniq = fn => Array.from(new Set(rows.map(fn))).sort((a,b)=>String(a).localeCompare(String(b),'pt-BR'));
   const fill = (id, allLabel, options, key) => {
     const el = document.getElementById(id); if(!el) return;
@@ -1687,7 +1659,7 @@ function updateProtoQueueBody(){
     <div class="table-wrap"><table class="data-table"><thead><tr><th>Protocolo</th><th>Status</th><th>Criado em</th><th>Em aberto há</th><th>Agente</th>${showSetor?"<th>Setor</th>":""}<th>Categoria</th><th>Como fechar</th></tr></thead>
     <tbody>${slice.length ? slice.map(r=>`<tr><td><b>${esc(r.numero||"—")}</b></td><td>${protoStatusPill(r._status)}</td><td>${fmtDateTime(r._date)}</td><td>${protoDiasPill(r._dias)}</td>
       <td>${esc(r.agente||"—")}</td>${showSetor?`<td>${esc(r.setor)}</td>`:""}<td>${esc(r.categoria||"—")}</td>
-      <td style="color:var(--text-muted);">${r.setor==="Chatbot" ? "Via banco, por solicitação" : (r._legado ? "Via banco (legado)" : "No Gestor")}</td></tr>`).join("")
+      <td style="color:var(--text-muted);">${r.setor==="Chatbot" ? "Via banco, por solicitação" : "No Gestor"}</td></tr>`).join("")
       : `<tr><td colspan="8" style="color:var(--text-muted);padding:22px 12px;">Nenhum protocolo pendente com esses filtros.</td></tr>`}</tbody></table></div>
     ${pages>1 ? `<div class="proto-pager"><button class="btn btn-ghost btn-sm" id="pqPrev" ${protoUI.page===0?"disabled":""}>‹ Anterior</button>
       <span>Página ${fmtNum(protoUI.page+1)} de ${fmtNum(pages)}</span>
@@ -1698,11 +1670,11 @@ function updateProtoQueueBody(){
 function exportProtoQueueCsv(){
   const rows = protoQueueRows();
   const cell = v => `"${String(v===null||v===undefined?"":v).replace(/"/g,'""')}"`;
-  const lines = [["numero_protocolo","status","criado_em","dias_em_aberto","agente","setor","categoria","recorte","data_extracao"].map(cell).join(";")];
+  const lines = [["numero_protocolo","status","criado_em","dias_em_aberto","agente","setor","categoria","data_extracao"].map(cell).join(";")];
   const ext = fmtDate(protoExtracao());
   rows.forEach(r=>{
     lines.push([`="${String(r.numero||"").replace(/"/g,'')}"`, cell(r._status), cell(fmtDateTime(r._date)), isFinite(r._dias)?r._dias:"",
-      cell(r.agente), cell(r.setor), cell(r.categoria), cell(r._legado?"Legado":"Corrente"), cell(ext)].join(";"));
+      cell(r.agente), cell(r.setor), cell(r.categoria), cell(ext)].join(";"));
   });
   const blob = new Blob(["﻿"+lines.join("\r\n")], {type:"text/csv;charset=utf-8;"});
   const a = document.createElement('a');
@@ -1726,11 +1698,8 @@ function verticalBarChart(canvasId, labels, datasets, opts={}){
   }catch(err){ showChartError(canvasId, err); return null; }
 }
 function afterRenderProtocols(){
-  document.querySelectorAll('[data-proto-scope]').forEach(el=>{
-    el.addEventListener('click', ()=>{ protoUI.scope = el.dataset.protoScope; protoUI.page = 0; renderScreen(); });
-  });
   if(!document.getElementById('protoQueueBody')) return;
-  const rows = protoScoped(protoBase());
+  const rows = protoBase();
 
   if(document.getElementById('chartProtoFaixa')){
     const counts = PROTO_FAIXAS.map(f=>rows.filter(r=>{ const x = protoFaixaOf(r._dias); return x && x.key===f.key; }).length);
@@ -1770,11 +1739,11 @@ function afterRenderProtocols(){
 }
 function protoOverviewKpi(){
   if(!hasSheetData('protocols')) return "";
-  const base = protoBase(); const corr = base.filter(r=>!r._legado);
-  const mais30 = corr.filter(r=>r._dias>PROTO_DIAS_ALERTA).length;
-  return kpiCard("Protocolos em aberto", fmtNum(corr.length),
-    `criados a partir de ${protoCorrenteLabel()} · ${fmtNum(mais30)} há mais de ${PROTO_DIAS_ALERTA} dias · legado ${fmtNum(base.length-corr.length)} · extração de ${fmtDate(protoExtracao())}`,
-    corr.length ? (mais30/corr.length<=0.2 ? `<span class="kpi-badge badge-good">bom</span>` : `<span class="kpi-badge badge-bad">atenção</span>`) : "");
+  const base = protoBase();
+  const mais30 = base.filter(r=>r._dias>PROTO_DIAS_ALERTA).length;
+  return kpiCard("Protocolos em aberto", fmtNum(base.length),
+    `${fmtNum(mais30)} há mais de ${PROTO_DIAS_ALERTA} dias · extração de ${fmtDate(protoExtracao())}`,
+    base.length ? (mais30/base.length<=0.2 ? `<span class="kpi-badge badge-good">bom</span>` : `<span class="kpi-badge badge-bad">atenção</span>`) : "");
 }
 function showLoading(text){ document.getElementById('loadingText').textContent = text; document.getElementById('loadingOverlay').style.display = 'flex'; }
 function hideLoading(){ document.getElementById('loadingOverlay').style.display = 'none'; }
