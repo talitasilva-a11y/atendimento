@@ -1592,14 +1592,6 @@ function renderProtocols(){
       <td>${r.corr ? `<span style="color:${riskColor(r.mais30/r.corr,0.2,0.5,true)};font-weight:700;">${fmtNum(r.mais30)} (${fmtPct(r.mais30/r.corr)})</span>` : "—"}</td>
       <td>${isFinite(r.media) ? fmtNum(r.media,1)+" dias" : "—"}</td></tr>`).join("")}</tbody></table></div></div>` : "";
 
-  /* Tabela por agente (recorte selecionado) */
-  const byAg = groupBy(rows, r=>r.agente||"—");
-  const agRows = Array.from(byAg.entries()).map(([a, rs])=>{
-    const x = protoResumo(rs);
-    return [a, esc(rs[0].setor), `<b>${fmtNum(x.total)}</b>`, fmtNum(x.aguardando), fmtNum(x.mais30), isFinite(x.maisAntigo) ? fmtNum(x.maisAntigo)+" dias" : "—", x.total];
-  }).sort((a,b)=>b[6]-a[6]).map(r=>r.slice(0,6));
-  const agTable = rankingTableCard(`Pendências por agente <small>recorte ${scopeNome}</small>`, ["Agente","Setor","Em aberto","Aguardando",`+${PROTO_DIAS_ALERTA} dias`,"Mais antigo"], agRows, {boldFirst:true, limit:20});
-
   /* Evolução entre extrações */
   const evol = protoEvolucao();
   let evolHtml = "";
@@ -1627,7 +1619,7 @@ function renderProtocols(){
   <div class="ranking-tabs">${scopeTabs.map(t=>`<button class="rtab ${protoUI.scope===t.key?'active':''}" data-proto-scope="${t.key}">${t.label}</button>`).join("")}</div>
   <div class="section-title"><span class="chev">›</span> Indicadores de protocolos</div><div class="kpi-grid">${kpis.join("")}</div>
   ${cards.length ? `<div class="section-title"><span class="chev">›</span> Perfil das pendências <small style="font-weight:500;color:var(--text-muted);">recorte ${scopeNome}</small></div><div class="grid-auto">${cards.join("")}</div>` : ""}
-  <div class="section-title"><span class="chev">›</span> Pendências por setor e agente</div><div class="grid-auto">${setorTable}${agTable}</div>
+  <div class="section-title"><span class="chev">›</span> Pendências por setor</div>${setorTable}
   ${evolHtml}
   <div class="section-title"><span class="chev">›</span> Fila de protocolos pendentes <small style="font-weight:500;color:var(--text-muted);">recorte ${scopeNome}, do mais antigo para o mais novo</small></div>
   <div class="card">
