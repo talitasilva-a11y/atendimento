@@ -1979,8 +1979,8 @@ function relDados(tipo, alvo, mes){
     "Satisfação":rows.sat.length, "Monitoria":rows.mon.length, "Pausas":rows.pau.length };
   /* dir: 1 = maior é melhor, -1 = menor é melhor, 0 = só informativo */
   const ind = [
-    {g:"Chamadas recebidas", k:"rec_ent", l:"Chamadas recebidas", v:R.entrantes, f:"num", dir:0},
-    {g:"Chamadas recebidas", k:"rec_at", l:"Chamadas atendidas", v:R.atendidas, f:"num", dir:0},
+    {g:"Chamadas recebidas", k:"rec_ent", l:"Chamadas recebidas", v:R.entrantes, f:"num", dir:1},
+    {g:"Chamadas recebidas", k:"rec_at", l:"Chamadas atendidas", v:R.atendidas, f:"num", dir:1},
     {g:"Chamadas recebidas", k:"rec_pat", l:"% atendidas", v:R.pctAtendidas, f:"pct", dir:1},
     {g:"Chamadas recebidas", k:"rec_ab", l:"% abandono", v:R.pctAbandono, f:"pct", dir:-1},
     {g:"Chamadas recebidas", k:"rec_ns", l:"Nível de serviço (até 20s)", v:R.nivelServico, f:"pct100", dir:1},
@@ -1988,8 +1988,8 @@ function relDados(tipo, alvo, mes){
     {g:"Chamadas recebidas", k:"rec_tma", l:"TMA (tempo médio de atendimento)", v:R.tma, f:"sec", dir:0},
     {g:"Chamadas recebidas", k:"rec_rech", l:"% rechamadas no mesmo dia", v:R.pctRechamadas, f:"pct", dir:-1},
     {g:"Chamadas recebidas", k:"rec_tr", l:"Transferências feitas", v:R.transferFeitas, f:"num", dir:-1},
-    {g:"Chamadas realizadas", k:"made_tot", l:"Chamadas realizadas", v:M.total, f:"num", dir:0},
-    {g:"Chamadas realizadas", k:"made_at", l:"Chamadas completadas", v:M.atendidas, f:"num", dir:0},
+    {g:"Chamadas realizadas", k:"made_tot", l:"Chamadas realizadas", v:M.total, f:"num", dir:1},
+    {g:"Chamadas realizadas", k:"made_at", l:"Chamadas completadas", v:M.atendidas, f:"num", dir:1},
     {g:"Chamadas realizadas", k:"made_tx", l:"Taxa de contato efetivo (1 min ou mais)", v:M.taxaContato, f:"pct100", dir:1},
     {g:"Chamadas realizadas", k:"made_tma", l:"TMA das realizadas", v:M.tma, f:"sec", dir:0},
     {g:"Chat", k:"chat_tot", l:"Conversas de chat", v:rows.chat.length, f:"num", dir:0},
@@ -1997,7 +1997,7 @@ function relDados(tipo, alvo, mes){
     {g:"Chat", k:"chat_tma", l:"TMA do chat", v:P.tma, f:"sec", dir:0},
     {g:"Satisfação", k:"sat_n", l:"Avaliações recebidas", v:S.total, f:"num", dir:0},
     {g:"Satisfação", k:"sat_m", l:"Satisfação média (1 a 10)", v:S.media, f:"nota", dir:1},
-    {g:"Satisfação", k:"sat_res", l:"Resolução no 1º contato", v:Rs.pct, f:"pct", dir:1},
+    {g:"Satisfação", k:"sat_res", l:"Resolução informada pelo cliente (% Sim)", v:Rs.pct, f:"pct", dir:1},
     {g:"Satisfação", k:"sat_nps", l:"NPS (média 1 a 10)", v:N.media, f:"nota", dir:1},
     {g:"Monitoria", k:"mon_n", l:"Monitorias realizadas", v:Mo.total, f:"num", dir:0},
     {g:"Monitoria", k:"mon_m", l:"Nota média de monitoria", v:Mo.media, f:"pct", dir:1},
