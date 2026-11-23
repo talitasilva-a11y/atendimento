@@ -22,21 +22,33 @@ const PROTO_SUPABASE = {
   tabelaSaldo: "protocolos_saldo",
   tabelaMovimento: "protocolos_movimento",
   propriedade: "PROTO_SUPABASE_ASSINATURA",
+  propriedadeDesde: "PROTO_SUPABASE_ULTIMA_ENVIADA",
   lote: 1000
 };
 
+// Registra no log quanto tempo cada etapa levou, para saber onde o envio demora.
+function _protoEtapa(t0, nome) {
+  Logger.log("Protocolos (Supabase) — " + nome + ": " + Math.round((Date.now() - t0) / 1000) + "s");
+}
+
 function enviarProtocolosSupabase(forcar) {
+  const t0 = Date.now();
   try {
     if (!SERVICE_ROLE_KEY) return ["ERRO em Protocolos (Supabase): chave SERVICE_ROLE_KEY não cadastrada"];
     const tz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
     // Guarda as datas já convertidas: a mesma data se repete em milhares de linhas.
-    const cacheDia = {};
+    const cacheDia = {}, cacheDiaHora = {};
+    const chave = v => v instanceof Date ? v.getTime() : String(v);
     const dia = v => {
-      const k = v instanceof Date ? v.getTime() : String(v);
+      const k = chave(v);
       if (!(k in cacheDia)) { const d = _paraData(v); cacheDia[k] = d ? Utilities.formatDate(d, tz, "yyyy-MM-dd") : null; }
       return cacheDia[k];
     };
-    const diaHora = v => { const d = _paraData(v); return d ? Utilities.formatDate(d, tz, "yyyy-MM-dd'T'HH:mm:ss") : null; };
+    const diaHora = v => {
+      const k = chave(v);
+      if (!(k in cacheDiaHora)) { const d = _paraData(v); cacheDiaHora[k] = d ? Utilities.formatDate(d, tz, "yyyy-MM-dd'T'HH:mm:ss") : null; }
+      return cacheDiaHora[k];
+    };
     const texto = v => (v === "" || v === null || v === undefined) ? null : String(v).trim();
     const numero = v => {
       if (v === "" || v === null || v === undefined) return null;
@@ -54,6 +66,7 @@ function enviarProtocolosSupabase(forcar) {
     const abaDados = findSheetCaseInsensitive(PROTOCOLOS.abaDados);
     if (!abaDados) return ["ERRO em Protocolos (Supabase): aba não encontrada: " + PROTOCOLOS.abaDados];
     const dados = _protoLerAba(abaDados);
+    _protoEtapa(t0, "leitura da aba " + PROTOCOLOS.abaDados + " (" + dados.linhas.length + " linhas)");
     if (!dados.linhas.length) return ["OK: Protocolos (Supabase): aba vazia, nada enviado"];
     ["data_extracao", "numero_protocolo", "status", "criado_em", "agente", "setor", "categoria"].forEach(c => {
       if (dados.idx[c] === undefined) throw new Error("coluna não encontrada na aba " + PROTOCOLOS.abaDados + ": " + c);
@@ -79,6 +92,7 @@ function enviarProtocolosSupabase(forcar) {
         categoria: texto(r[dados.idx.categoria])
       });
     });
+    _protoEtapa(t0, "preparo dos protocolos (" + protocolos.length + ")");
 
     // ---- aba SALDO PROTOCOLOS ----
     const saldo = [];
@@ -129,6 +143,7 @@ function enviarProtocolosSupabase(forcar) {
         });
       });
     }
+    _protoEtapa(t0, "preparo de saldo (" + saldo.length + ") e movimento (" + movimento.length + ")");
 
     // ---- só reenvia se algo mudou desde o último envio ----
     const props = PropertiesService.getScriptProperties();
@@ -136,25 +151,39 @@ function enviarProtocolosSupabase(forcar) {
     const resumo = "extração " + ultima.split("-").reverse().join("/") + ": " + protocolos.length +
       " protocolos, " + saldo.length + " linhas de saldo, " + movimento.length + " de movimento";
     if (!forcar && props.getProperty(PROTO_SUPABASE.propriedade) === assinatura) {
-      return ["OK: Protocolos (Supabase): sem mudança, nada reenviado (" + resumo + ")"];
+      return ["OK: Protocolos (Supabase): sem mudança, nada reenviado (" + resumo + ", " + Math.round((Date.now() - t0) / 1000) + "s)"];
     }
 
-    // Se falhar no meio, a assinatura não é gravada e a próxima execução tenta de novo.
+    // Saldo e movimento: reenvia só a partir da última extração já enviada.
+    // No primeiro envio (ou com forcar) manda o histórico inteiro.
+    const desde = forcar ? null : props.getProperty(PROTO_SUPABASE.propriedadeDesde);
+    const recentes = lista => desde ? lista.filter(l => l.data_extracao >= desde) : lista;
+
+    // Se falhar no meio, nada é gravado e a próxima execução tenta de novo.
     props.deleteProperty(PROTO_SUPABASE.propriedade);
-    [[PROTO_SUPABASE.tabelaProtocolos, protocolos],
-     [PROTO_SUPABASE.tabelaSaldo, saldo],
+    deleteRows(PROTO_SUPABASE.tabelaProtocolos, null);
+    _protoEtapa(t0, "apagou " + PROTO_SUPABASE.tabelaProtocolos);
+    if (protocolos.length) insertInBatches(PROTO_SUPABASE.tabelaProtocolos, protocolos, PROTO_SUPABASE.lote);
+    _protoEtapa(t0, "inseriu " + PROTO_SUPABASE.tabelaProtocolos);
+    [[PROTO_SUPABASE.tabelaSaldo, saldo],
      [PROTO_SUPABASE.tabelaMovimento, movimento]].forEach(par => {
-      deleteRows(par[0], null); // um único pedido que apaga a tabela inteira
-      if (par[1].length) insertInBatches(par[0], par[1], PROTO_SUPABASE.lote);
+      const envio = recentes(par[1]);
+      deleteRows(par[0], desde, "data_extracao");
+      _protoEtapa(t0, "apagou " + par[0]);
+      if (envio.length) insertInBatches(par[0], envio, PROTO_SUPABASE.lote);
+      _protoEtapa(t0, "inseriu " + par[0] + " (" + envio.length + ")");
     });
     props.setProperty(PROTO_SUPABASE.propriedade, assinatura);
-    return ["OK: Protocolos (Supabase): enviado (" + resumo + ")"];
+    props.setProperty(PROTO_SUPABASE.propriedadeDesde, ultima);
+
+    const modo = desde ? "a partir de " + desde.split("-").reverse().join("/") : "histórico completo";
+    return ["OK: Protocolos (Supabase): enviado, " + modo + " (" + resumo + ", " + Math.round((Date.now() - t0) / 1000) + "s)"];
   } catch (e) {
-    return ["ERRO em Protocolos (Supabase): " + e.message];
+    return ["ERRO em Protocolos (Supabase): " + e.message + " (após " + Math.round((Date.now() - t0) / 1000) + "s)"];
   }
 }
-
-// Força o reenvio mesmo sem mudança (útil depois de recriar as tabelas no Supabase).
+// Força o reenvio de TUDO (útil depois de recriar as tabelas no Supabase,
+// alterar extrações antigas ou mudar as datas de corte).
 function reenviarProtocolosSupabase() {
   const linhas = enviarProtocolosSupabase(true);
   linhas.forEach(l => Logger.log(l));
