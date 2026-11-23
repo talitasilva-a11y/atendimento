@@ -290,6 +290,10 @@ table.data-table tbody tr:hover{background:#FAFAFD;}
 .rel-table th:not(:first-child){text-align:right;}
 .rel-grp td{background:#F5F6FA;font-weight:700;color:#1C1F26;padding-top:9px;}
 .rel-up{color:#1F8A4C;font-weight:600;} .rel-down{color:#C2500F;font-weight:600;} .rel-muted{color:#8B8F9E;font-weight:400;}
+.rel-nota{font-size:10.5px;color:#6B7280;margin:6px 0 0;line-height:1.4;}
+.rel-parecer p.rel-alerta{border-left:4px solid #C2500F;background:#FFF1E8;padding:8px 10px;border-radius:6px;font-weight:600;}
+.rel-urgente td{background:#FFE9DD;}
+.rel-meta-ok{color:#1F8A4C;font-weight:600;} .rel-meta-baixo{color:#C2500F;font-weight:600;} .rel-meta-muito{color:#B42318;font-weight:700;}
 @media (max-width:700px){ .rel-doc{padding:16px;overflow-x:auto;} }
 /* ---------- LOGIN ---------- */
 .login-screen{
@@ -1966,10 +1970,43 @@ function relRows(key, tipo, alvo, mes, setor){
     String(tipo==="setor" ? (r.setor||"") : (r.agente||"")).trim()===alvo &&
     (!setor || String(r.setor||"").trim()===setor));
 }
+/* Regras de negócio dos relatórios */
+const REL_META = 0.9;            // meta de satisfação, NPS, taxa de resolução e monitoria
+const REL_META_MUITO = 0.10;     // 10 p.p. ou mais abaixo da meta = "muito abaixo"
+const PAUSA_TOLERANCIA_SEG = 10; // acima do limite + 10s é falta grave
+function relMeta(v){
+  if(!isFinite(v)) return null;
+  const gap = (v-REL_META)*100;
+  const nivel = v >= REL_META-1e-9 ? "ok" : (REL_META-v >= REL_META_MUITO-1e-9 ? "muito" : "abaixo");
+  return { nivel, gap };
+}
+function relMetaTxt(m){
+  if(!m) return "";
+  if(m.nivel==="ok") return "Meta atingida";
+  return (m.nivel==="muito" ? "MUITO ABAIXO da meta" : "Abaixo da meta") + ` (${fmtNum(m.gap,1)} p.p.)`;
+}
+const relMetaCls = m => !m ? "" : m.nivel==="ok" ? "rel-meta-ok" : m.nivel==="muito" ? "rel-meta-muito" : "rel-meta-baixo";
 function relPausas(rows){
   let exc = 0, controladas = 0;
-  rows.forEach(r=>{ const lim = pauseLimitSecFor(r.tipo, r.setor); if(lim && !pauseIsAlertOnly(r.tipo)){ controladas++; if(r._sec>lim) exc++; } });
+  rows.forEach(r=>{ const lim = pauseLimitSecFor(r.tipo, r.setor); if(lim && !pauseIsAlertOnly(r.tipo)){ controladas++; if(r._sec>lim+PAUSA_TOLERANCIA_SEG) exc++; } });
   return { total: sum(rows.map(r=>r._sec)), media: avg(rows.map(r=>r._sec)), count: rows.length, exc, pctExc: controladas ? exc/controladas : NaN };
+}
+function relPausasPorTipo(rows){
+  const out = [];
+  groupBy(rows, r=>r.tipo||"—").forEach((list, tipo)=>{
+    const limite = pauseLimitSecFor(tipo, list[0]?.setor), alertOnly = pauseIsAlertOnly(tipo);
+    const controlada = !!(limite && !alertOnly);
+    const exc = controlada ? list.filter(r=>r._sec>limite+PAUSA_TOLERANCIA_SEG).length : 0;
+    out.push({ tipo, count:list.length, totalSec:sum(list.map(r=>r._sec)), media:avg(list.map(r=>r._sec)), limite, alertOnly,
+      excedentesCount:exc, pctExc: controlada && list.length ? exc/list.length : NaN });
+  });
+  return out.sort((a,b)=>b.totalSec-a.totalSec);
+}
+/* Média por agente por dia trabalhado: total dividido pelos dias em que cada agente teve registros. */
+function relMediaDia(lista){
+  const pares = new Set();
+  lista.forEach(r=>{ if(r._date) pares.add(String(r.agente||"").trim()+"|"+r._date.toDateString()); });
+  return pares.size ? lista.length/pares.size : NaN;
 }
 function relDados(tipo, alvo, mes, setor){
   const g = k => relRows(k, tipo, alvo, mes, setor);
@@ -1977,35 +2014,40 @@ function relDados(tipo, alvo, mes, setor){
   const R = computeReceivedMetrics(rows.rec), M = computeMadeMetrics(rows.made), P = computeChatPerfMetrics(rows.perf);
   const S = computeSatisfacao(rows.sat), Rs = computeResolucao(rows.sat), N = computeNps(rows.sat), Mo = computeMonitoria(rows.mon);
   const Pa = relPausas(rows.pau);
+  const mediaRec = relMediaDia(rows.rec.filter(r=>r._status==="Atendida")), mediaMade = relMediaDia(rows.made), mediaChat = relMediaDia(rows.chat);
   const tem = { "Chamadas recebidas":rows.rec.length, "Chamadas realizadas":rows.made.length, "Chat":rows.chat.length+rows.perf.length,
     "Satisfação":rows.sat.length, "Monitoria":rows.mon.length, "Pausas":rows.pau.length };
-  /* dir: 1 = maior é melhor, -1 = menor é melhor, 0 = só informativo */
+  /* dir: 1 = maior é melhor, -1 = menor é melhor, 0 = só informativo
+     meta: tem meta de 90% · falta: falta grave (redução não é melhora enquanto houver ocorrência) · urgente: queda exige ação imediata */
   const ind = [
     {g:"Chamadas recebidas", k:"rec_ent", l:"Chamadas recebidas", v:R.entrantes, f:"num", dir:1},
     {g:"Chamadas recebidas", k:"rec_at", l:"Chamadas atendidas", v:R.atendidas, f:"num", dir:1},
+    {g:"Chamadas recebidas", k:"rec_dia", l:"Média de chamadas atendidas por agente/dia", v:mediaRec, f:"dec1", dir:0},
     {g:"Chamadas recebidas", k:"rec_pat", l:"% atendidas", v:R.pctAtendidas, f:"pct", dir:1},
     {g:"Chamadas recebidas", k:"rec_ab", l:"% abandono", v:R.pctAbandono, f:"pct", dir:-1},
-    {g:"Chamadas recebidas", k:"rec_ns", l:"Nível de serviço (até 20s)", v:R.nivelServico, f:"pct100", dir:1},
+    {g:"Chamadas recebidas", k:"rec_ns", l:"Nível de serviço (até 20s)", v:R.nivelServico, f:"pct100", dir:1, urgente:true},
     {g:"Chamadas recebidas", k:"rec_tme", l:"TME (tempo médio de espera)", v:R.tme, f:"sec", dir:-1},
     {g:"Chamadas recebidas", k:"rec_tma", l:"TMA (tempo médio de atendimento)", v:R.tma, f:"sec", dir:0},
     {g:"Chamadas recebidas", k:"rec_rech", l:"% rechamadas no mesmo dia", v:R.pctRechamadas, f:"pct", dir:-1},
     {g:"Chamadas realizadas", k:"made_tot", l:"Chamadas realizadas", v:M.total, f:"num", dir:1},
+    {g:"Chamadas realizadas", k:"made_dia", l:"Média de chamadas realizadas por agente/dia", v:mediaMade, f:"dec1", dir:0},
     {g:"Chamadas realizadas", k:"made_at", l:"Chamadas completadas", v:M.atendidas, f:"num", dir:1},
     {g:"Chamadas realizadas", k:"made_tx", l:"Taxa de contato efetivo (1 min ou mais)", v:M.taxaContato, f:"pct100", dir:1},
     {g:"Chamadas realizadas", k:"made_tma", l:"TMA das realizadas", v:M.tma, f:"sec", dir:0},
     {g:"Chat", k:"chat_tot", l:"Conversas de chat", v:rows.chat.length, f:"num", dir:1},
+    {g:"Chat", k:"chat_dia", l:"Média de conversas de chat por agente/dia", v:mediaChat, f:"dec1", dir:0},
     {g:"Chat", k:"chat_tme", l:"TME da 1ª resposta", v:P.tmeResp, f:"sec", dir:-1},
     {g:"Chat", k:"chat_tma", l:"TMA do chat", v:P.tma, f:"sec", dir:0},
     {g:"Satisfação", k:"sat_n", l:"Avaliações recebidas", v:S.total, f:"num", dir:0},
-    {g:"Satisfação", k:"sat_m", l:"Satisfação média", v:S.media/10, f:"pct", dir:1},
-    {g:"Satisfação", k:"sat_res", l:"Taxa de resolução", v:Rs.pct, f:"pct", dir:1},
-    {g:"Satisfação", k:"sat_nps", l:"NPS", v:N.media/10, f:"pct", dir:1},
+    {g:"Satisfação", k:"sat_m", l:"Satisfação média", v:S.media/10, f:"pct", dir:1, meta:true, curto:"satisfação"},
+    {g:"Satisfação", k:"sat_res", l:"Taxa de resolução", v:Rs.pct, f:"pct", dir:1, meta:true, curto:"taxa de resolução"},
+    {g:"Satisfação", k:"sat_nps", l:"NPS", v:N.media/10, f:"pct", dir:1, meta:true, curto:"NPS"},
     {g:"Monitoria", k:"mon_n", l:"Monitorias realizadas", v:Mo.total, f:"num", dir:0},
-    {g:"Monitoria", k:"mon_m", l:"Nota média de monitoria", v:Mo.media, f:"pct", dir:1},
+    {g:"Monitoria", k:"mon_m", l:"Nota média de monitoria", v:Mo.media, f:"pct", dir:1, meta:true, curto:"monitoria"},
     {g:"Pausas", k:"pau_tot", l:"Tempo total em pausa", v:Pa.total, f:"sec", dir:-1},
     {g:"Pausas", k:"pau_med", l:"Duração média por pausa", v:Pa.media, f:"sec", dir:-1},
-    {g:"Pausas", k:"pau_exc", l:"Pausas acima do limite", v:Pa.exc, f:"num", dir:-1},
-    {g:"Pausas", k:"pau_pexc", l:"% de pausas acima do limite", v:Pa.pctExc, f:"pct", dir:-1},
+    {g:"Pausas", k:"pau_exc", l:"Pausas acima do limite + 10s (falta grave)", v:Pa.exc, f:"num", dir:-1, falta:true},
+    {g:"Pausas", k:"pau_pexc", l:"% de pausas acima do limite + 10s (falta grave)", v:Pa.pctExc, f:"pct", dir:-1, falta:true},
   ].map(i=>({...i, v: tem[i.g] ? i.v : NaN}));
   return { rows, ind, tem };
 }
@@ -2015,12 +2057,14 @@ function relFmt(v, f){
   if(f==="pct100") return fmtPct(v/100);
   if(f==="sec") return fmtSec(v);
   if(f==="nota") return fmtNum(v,1);
+  if(f==="dec1") return fmtNum(v,1);
   return fmtNum(v);
 }
-/* Compara o mês com o anterior. mag = tamanho da mudança (0 = estável). */
+/* Compara o mês com o anterior. mag = tamanho da mudança (0 = estável); sinal: +1 melhorou, -1 piorou/falta, 0 neutro. */
 function relComparar(i, ant){
   const a = ant, b = i.v;
-  if(!isFinite(a) || !isFinite(b)) return { txt:"—", mag:0, aval:"" };
+  if(i.falta && isFinite(b) && b>0 && !isFinite(a)) return { txt:"—", mag:0, aval:"Falta grave", sinal:-1, urgente:false };
+  if(!isFinite(a) || !isFinite(b)) return { txt:"—", mag:0, aval:"", sinal:0, urgente:false };
   let txt, mag;
   if(i.f==="pct" || i.f==="pct100"){
     const pp = i.f==="pct" ? (b-a)*100 : (b-a);
@@ -2032,9 +2076,19 @@ function relComparar(i, ant){
   }else{
     const r = (b-a)/a; txt = (r>0?"+":"")+fmtPct(r); mag = Math.abs(r)<0.02 ? 0 : r;
   }
-  let aval = "";
-  if(i.dir!==0) aval = mag===0 ? "Estável" : (mag*i.dir>0 ? "Melhorou" : "Piorou");
-  return { txt, mag, aval };
+  let aval = "", sinal = 0;
+  if(i.falta){
+    if(b===0){ aval = "Sem ocorrências"; sinal = a>0 ? 1 : 0; }
+    else if(b>a && mag!==0){ aval = "Piorou"; sinal = -1; }
+    else { aval = "Falta grave persiste"; sinal = -1; }
+  }else if(i.dir!==0){
+    if(mag===0) aval = "Estável";
+    else if(mag*i.dir>0){ aval = "Melhorou"; sinal = 1; }
+    else { aval = "Piorou"; sinal = -1; }
+  }
+  const urgente = !!(i.urgente && sinal<0);
+  if(urgente) aval = "Piorou — urgente";
+  return { txt, mag, aval, sinal, urgente };
 }
 function relAgentes(rows){
   const nomes = new Set();
@@ -2042,70 +2096,113 @@ function relAgentes(rows){
   const by = k => groupBy(rows[k], r=>String(r.agente||"").trim());
   const rec = by('rec'), made = by('made'), chat = by('chat'), sat = by('sat'), mon = by('mon'), pau = by('pau');
   return Array.from(nomes).map(a=>{
-    const s = computeSatisfacao(sat.get(a)||[]), n = computeNps(sat.get(a)||[]), m = computeMonitoria(mon.get(a)||[]);
+    const recL = rec.get(a)||[], madeL = made.get(a)||[], chatL = chat.get(a)||[], satL = sat.get(a)||[], monL = mon.get(a)||[];
+    const s = computeSatisfacao(satL), n = computeNps(satL), rs = computeResolucao(satL), m = computeMonitoria(monL);
     const p = relPausas(pau.get(a)||[]);
-    const recL = rec.get(a)||[], madeL = made.get(a)||[];
+    const recAt = recL.filter(r=>r._status==="Atendida");
     return { agente:a,
-      recebidas: recL.filter(r=>r._status==="Atendida").length,
+      recebidas: recAt.length, recebidasDia: relMediaDia(recAt),
+      recTotal: recL.length, nivelServ: computeReceivedMetrics(recL).nivelServico,
+      tentativas: madeL.length, realizadasDia: relMediaDia(madeL),
       realizadas: madeL.filter(r=>r._status==="Atendida" && isFinite(r._dur) && r._dur>=60).length,
-      chats: (chat.get(a)||[]).length,
-      tentativas: madeL.length,
-      satMedia: s.media/10, satN: s.total, npsMedia: n.media/10, monMedia: m.media,
+      chats: chatL.length, chatDia: relMediaDia(chatL),
+      satMedia: s.media/10, satN: s.total, npsMedia: n.media/10, npsN: n.total,
+      resPct: rs.pct, resN: rs.total, monMedia: m.media, monN: m.total,
       pausaTotal: p.total, pausaExc: p.exc };
   }).sort((x,y)=>(y.recebidas+y.realizadas+y.chats)-(x.recebidas+x.realizadas+x.chats));
 }
 function relMesTxt(iso){ const [y,m] = iso.split("-"); return MESES_PT_LONG[+m-1].toLowerCase()+" de "+y; }
 function relLista(itens){ return itens.length<=1 ? itens.join("") : itens.slice(0,-1).join("; ")+" e "+itens[itens.length-1]; }
+/* Pontos que exigem ação do gestor, independentemente do saldo de melhoras e pioras. */
+function relCriticos(rel){
+  const prev = Object.fromEntries(rel.prv.ind.map(i=>[i.k, i.v]));
+  const out = [];
+  const ns = rel.cur.ind.find(i=>i.k==="rec_ns");
+  if(ns && relComparar(ns, prev.rec_ns).urgente) out.push("queda no nível de serviço");
+  const ex = rel.cur.ind.find(i=>i.k==="pau_exc");
+  if(ex && ex.v>0) out.push("pausas acima do limite (falta grave)");
+  rel.cur.ind.filter(i=>i.meta && relMeta(i.v)?.nivel==="muito").forEach(i=>out.push(`${i.curto} muito abaixo da meta de 90%`));
+  return out;
+}
 /* Peso de cada grupo na visão geral: atendimento ao cliente e satisfação pesam mais que pausas. */
 const REL_PESOS = { "Chamadas recebidas":3, "Satisfação":3, "Chat":2, "Monitoria":2, "Chamadas realizadas":1.5, "Pausas":1 };
 function relVisaoGeral(rel){
   const prev = Object.fromEntries(rel.prv.ind.map(i=>[i.k, i.v]));
   const grupos = [];
-  let somaPeso = 0, somaNota = 0, melhorou = 0, piorou = 0, estavel = 0;
+  let somaPeso = 0, somaNota = 0, melhorou = 0, piorou = 0, graves = 0, estavel = 0;
   REL_GRUPOS.forEach(g=>{
-    const sinais = rel.cur.ind.filter(i=>i.g===g && i.dir!==0).map(i=>relComparar(i, prev[i.k])).filter(c=>c.aval)
-      .map(c=>c.aval==="Melhorou" ? 1 : c.aval==="Piorou" ? -1 : 0);
-    if(!sinais.length) return;
-    sinais.forEach(x=>{ if(x>0) melhorou++; else if(x<0) piorou++; else estavel++; });
-    const nota = sinais.reduce((a,b)=>a+b,0)/sinais.length;
-    grupos.push({g, nota});
-    somaPeso += REL_PESOS[g]; somaNota += REL_PESOS[g]*nota;
+    const cs = rel.cur.ind.filter(i=>i.g===g && i.dir!==0).map(i=>relComparar(i, prev[i.k])).filter(c=>c.aval);
+    if(!cs.length) return;
+    cs.forEach(c=>{ if(c.aval.indexOf("Falta grave")===0) graves++; else if(c.sinal>0) melhorou++; else if(c.sinal<0) piorou++; else estavel++; });
+    grupos.push({g, nota: cs.reduce((x,c)=>x+c.sinal,0)/cs.length});
+    somaPeso += REL_PESOS[g]; somaNota += REL_PESOS[g]*grupos[grupos.length-1].nota;
   });
   if(!grupos.length) return null;
-  const total = melhorou+piorou+estavel;
+  const total = melhorou+piorou+graves+estavel;
   /* metade pelo peso de cada grupo, metade pela contagem simples de indicadores */
-  const geral = 0.5*(somaNota/somaPeso) + 0.5*(total ? (melhorou-piorou)/total : 0);
+  const geral = 0.5*(somaNota/somaPeso) + 0.5*(total ? (melhorou-piorou-graves)/total : 0);
   const nomeG = g => g.charAt(0).toLowerCase()+g.slice(1);
   const bons = grupos.filter(x=>x.nota>=0.34).map(x=>nomeG(x.g));
   const ruins = grupos.filter(x=>x.nota<=-0.34).map(x=>nomeG(x.g));
+  const criticos = relCriticos(rel);
   let resultado;
   if(geral>=0.5) resultado = "positivo";
   else if(geral>=0.15) resultado = "levemente positivo";
   else if(geral>-0.15) resultado = "estável, com melhoras e pioras que se equilibram";
   else if(geral>-0.5) resultado = "levemente negativo";
   else resultado = "negativo";
-  return { geral, resultado, bons, ruins, melhorou, piorou, estavel };
+  if(criticos.length){
+    if(geral>=0.15) resultado = "misto: houve avanços, mas há pontos críticos que exigem ação do gestor";
+    else if(geral>-0.15) resultado = "estável nos números, mas com pontos críticos que exigem ação do gestor";
+    else if(geral>-0.5) resultado = "levemente negativo, com pontos críticos que exigem ação do gestor";
+  }
+  return { geral, resultado, bons, ruins, melhorou, piorou, graves, estavel, criticos };
 }
 function relParecer(rel){
   const mesL = relMesTxt(rel.mes), antL = relMesTxt(rel.ant), antCurto = antL.split(" ")[0];
   const quem = rel.tipo==="setor" ? `o setor ${rel.alvo}` : `o(a) agente ${rel.alvo}${rel.setorFixo ? ` no setor ${rel.setorFixo}` : ""}`;
+  const doQuem = quem.replace(/^o\(a\) /, "do(a) ").replace(/^o /, "do ");
+  const peloQuem = quem.replace(/^o\(a\) /, "pelo(a) ").replace(/^o /, "pelo ");
   const ind = rel.cur.ind, prev = Object.fromEntries(rel.prv.ind.map(i=>[i.k, i.v]));
   const v = k => ind.find(i=>i.k===k);
   const temAnterior = REL_GRUPOS.some(g=>rel.prv.tem[g]);
   const p = [];
+  const criticos = relCriticos(rel);
+
+  /* 1. Alerta urgente: queda do nível de serviço */
+  const ns = v("rec_ns");
+  if(ns && isFinite(ns.v)){
+    const c = relComparar(ns, prev.rec_ns);
+    if(c.urgente){
+      let t = `⚠ URGENTE — Nível de serviço: caiu de ${relFmt(prev.rec_ns,"pct100")} para ${relFmt(ns.v,"pct100")} (${c.txt}). `+
+        `Apenas ${relFmt(ns.v,"pct100")} das chamadas recebidas ${peloQuem} foram atendidas em até 20 segundos; as outras ${relFmt(100-ns.v,"pct100")} ficaram tocando por mais de 20 segundos ou foram abandonadas. `+
+        `Não há demanda suficiente em nenhum setor que justifique um ramal tocando por esse tempo, por isso o gestor do setor deve analisar a causa com urgência (escala, ausências, pausas fora do limite e logins).`;
+      if(rel.tipo==="setor"){
+        const piores = rel.agentes.filter(a=>a.recTotal>=10 && isFinite(a.nivelServ)).sort((x,y)=>x.nivelServ-y.nivelServ).slice(0,3);
+        if(piores.length) t += ` Menor nível de serviço por agente: ${piores.map(a=>`${a.agente} (${relFmt(a.nivelServ,"pct100")})`).join(", ")}.`;
+      }
+      p.push(t);
+    }
+  }
+
+  /* 2. Visão geral */
   const vg = temAnterior ? relVisaoGeral(rel) : null;
   if(vg){
-    const total = vg.melhorou+vg.piorou+vg.estavel;
-    const doQuem = quem.replace(/^o\(a\) /, "do(a) ").replace(/^o /, "do ");
+    const total = vg.melhorou+vg.piorou+vg.graves+vg.estavel;
     const pl = (n, um, varios) => `${n} ${n===1 ? um : varios}`;
     let t = `Visão geral: o resultado ${doQuem} em ${mesL}, comparado a ${antL}, foi ${vg.resultado}. `+
-      `Dos ${total} indicadores comparáveis, ${pl(vg.melhorou,"melhorou","melhoraram")}, ${pl(vg.piorou,"piorou","pioraram")} e ${pl(vg.estavel,"ficou estável","ficaram estáveis")}.`;
+      `Dos ${total} indicadores comparáveis, ${pl(vg.melhorou,"melhorou","melhoraram")}, ${pl(vg.piorou,"piorou","pioraram")}`+
+      `${vg.graves ? `, ${pl(vg.graves,"segue em falta grave","seguem em falta grave")}` : ""} e ${pl(vg.estavel,"ficou estável","ficaram estáveis")}.`;
     if(vg.bons.length && vg.ruins.length) t += ` Os avanços se concentraram em ${relLista(vg.bons)}, enquanto houve piora em ${relLista(vg.ruins)}.`;
     else if(vg.bons.length) t += ` Os avanços se concentraram em ${relLista(vg.bons)}.`;
     else if(vg.ruins.length) t += ` A piora se concentrou em ${relLista(vg.ruins)}.`;
+    if(vg.criticos.length) t += ` Pontos críticos: ${relLista(vg.criticos)}.`;
     p.push(t);
+  }else if(criticos.length){
+    p.push(`Pontos críticos em ${mesL}: ${relLista(criticos)}.`);
   }
 
+  /* 3. Volume */
   const partes = [];
   const vol = (k, nome) => { const i = v(k); if(!isFinite(i.v)) return;
     const c = relComparar(i, prev[k]);
@@ -2115,34 +2212,82 @@ function relParecer(rel){
   p.push(partes.length ? `Em ${mesL}, ${quem} registrou ${relLista(partes)}.`
                        : `Em ${mesL}, não há registros de chamadas ou chat para ${quem}.`);
 
+  /* 4. Média por agente por dia */
+  const prod = [];
+  const med = (k, nome) => { const i = v(k); if(!isFinite(i.v)) return;
+    const c = relComparar(i, prev[k]);
+    prod.push(`${fmtNum(i.v,1)} ${nome}${c.txt==="—" ? "" : c.mag===0 ? ` (estável em relação a ${antCurto})` : ` (${c.txt} em relação a ${antCurto})`}`); };
+  med("rec_dia","chamadas recebidas atendidas"); med("made_dia","chamadas realizadas (tentativas)"); med("chat_dia","conversas de chat");
+  if(prod.length) p.push(`Média por agente, por dia trabalhado: ${relLista(prod)}.`);
+
+  /* 5. Metas de 90% */
+  const metas = ind.filter(i=>i.meta);
+  const comDado = metas.filter(i=>isFinite(i.v));
+  if(comDado.length){
+    const muito = comDado.some(i=>relMeta(i.v).nivel==="muito");
+    const frases = comDado.map(i=>{ const m = relMeta(i.v), tx = relMetaTxt(m);
+      return `${i.curto} ${fmtPct(i.v)}, ${m.nivel==="muito" ? tx : tx.charAt(0).toLowerCase()+tx.slice(1)}`; });
+    const sem = metas.filter(i=>!isFinite(i.v)).map(i=>i.curto);
+    p.push(`${muito ? "⚠ ATENÇÃO — " : ""}Metas de 90% (satisfação, NPS, taxa de resolução e monitoria): ${relLista(frases)}.${sem.length ? ` Sem registros: ${relLista(sem)}.` : ""}`);
+    if(rel.tipo==="setor"){
+      const def = [["satisfação", a=>a.satMedia, a=>a.satN>=5], ["NPS", a=>a.npsMedia, a=>a.npsN>=5],
+        ["taxa de resolução", a=>a.resPct, a=>a.resN>=5], ["monitoria", a=>a.monMedia, a=>a.monN>=1]];
+      const ps = [];
+      def.forEach(([nome, val, ok])=>{
+        const baixos = rel.agentes.filter(a=>ok(a) && relMeta(val(a))?.nivel==="muito").sort((x,y)=>val(x)-val(y)).slice(0,3);
+        if(baixos.length) ps.push(`${nome}: ${baixos.map(a=>`${a.agente} (${fmtPct(val(a))})`).join(", ")}`);
+      });
+      if(ps.length) p.push(`Agentes muito abaixo da meta de 90% (10 p.p. ou mais): ${ps.join("; ")}.`);
+    }
+  }
+
+  /* 6. Pausas: falta grave */
+  if(rel.cur.tem["Pausas"]){
+    const ex = v("pau_exc"), pe = v("pau_pexc");
+    if(ex.v>0){
+      let t = `⚠ FALTA GRAVE — Pausas acima do limite: em ${mesL}, ${fmtNum(ex.v)} ${ex.v===1?"pausa ultrapassou":"pausas ultrapassaram"} o limite em mais de ${PAUSA_TOLERANCIA_SEG} segundos`+
+        `${isFinite(pe.v) ? ` (${fmtPct(pe.v)} das pausas com limite definido)` : ""}.`;
+      const tipos = rel.pausasTipo.filter(x=>x.excedentesCount>0).sort((x,y)=>y.excedentesCount-x.excedentesCount).slice(0,4);
+      if(tipos.length) t += " Por tipo: "+tipos.map(x=>{
+        const an = rel.pausasTipoPrev.find(y=>y.tipo===x.tipo);
+        return `${x.tipo} ${fmtPct(x.pctExc)} ultrapassadas${an && isFinite(an.pctExc) ? ` (em ${antCurto}: ${fmtPct(an.pctExc)})` : ""}`;
+      }).join("; ")+".";
+      if(rel.tipo==="setor"){
+        const conc = rel.agentes.filter(a=>a.pausaExc>0).sort((x,y)=>y.pausaExc-x.pausaExc).slice(0,3);
+        if(conc.length) t += ` Concentração: ${conc.map(a=>`${a.agente} (${a.pausaExc})`).join(", ")}.`;
+      }
+      if(isFinite(prev.pau_pexc) && isFinite(pe.v)){
+        if(pe.v < prev.pau_pexc-1e-9) t += ` Mesmo com a redução em relação a ${antCurto} (de ${fmtPct(prev.pau_pexc)} para ${fmtPct(pe.v)}), a conduta de ultrapassar a pausa persiste: isso não é melhora e deve ser tratado com cada agente.`;
+        else if(pe.v > prev.pau_pexc+1e-9) t += ` A ocorrência aumentou em relação a ${antCurto} (de ${fmtPct(prev.pau_pexc)} para ${fmtPct(pe.v)}).`;
+        else t += ` O índice se manteve em relação a ${antCurto}.`;
+      }
+      p.push(t);
+    }else{
+      p.push(`Pausas: nenhuma pausa ultrapassou o limite (tolerância de ${PAUSA_TOLERANCIA_SEG} segundos) em ${mesL}${prev.pau_exc>0 ? `, contra ${fmtNum(prev.pau_exc)} em ${antCurto}` : ""}.`);
+    }
+  }
+
+  /* 7. Pontos positivos e de atenção (as pausas em falta grave já foram tratadas acima) */
   if(!temAnterior){
     p.push(`Não há dados de ${antL} para comparação; os números refletem apenas a competência selecionada.`);
   }else{
-    const comp = ind.filter(i=>i.dir!==0).map(i=>({i, c:relComparar(i, prev[i.k])})).filter(x=>x.c.mag!==0);
+    const comp = ind.filter(i=>i.dir!==0 && !i.falta).map(i=>({i, c:relComparar(i, prev[i.k])})).filter(x=>x.c.sinal!==0);
     const frase = x => `${x.i.l}: de ${relFmt(prev[x.i.k], x.i.f)} para ${relFmt(x.i.v, x.i.f)}`;
-    const bons = comp.filter(x=>x.c.mag*x.i.dir>0).sort((a,b)=>Math.abs(b.c.mag)-Math.abs(a.c.mag)).slice(0,4);
-    const ruins = comp.filter(x=>x.c.mag*x.i.dir<0).sort((a,b)=>Math.abs(b.c.mag)-Math.abs(a.c.mag)).slice(0,4);
+    const bons = comp.filter(x=>x.c.sinal>0).sort((a,b)=>Math.abs(b.c.mag)-Math.abs(a.c.mag)).slice(0,4);
+    const ruins = comp.filter(x=>x.c.sinal<0).sort((a,b)=>Math.abs(b.c.mag)-Math.abs(a.c.mag)).slice(0,4);
     if(bons.length) p.push(`Pontos positivos em relação a ${antL}: ${relLista(bons.map(frase))}.`);
     if(ruins.length) p.push(`Pontos de atenção: ${relLista(ruins.map(frase))}.`);
     if(!bons.length && !ruins.length) p.push(`Os indicadores de qualidade ficaram estáveis em relação a ${antL}.`);
   }
 
+  /* 8. Destaques por agente (setor) */
   if(rel.tipo==="setor" && rel.agentes.length){
-    const ag = rel.agentes;
-    const top = ag[0];
-    const extra = [];
+    const ag = rel.agentes, top = ag[0], extra = [];
     if(top && (top.recebidas+top.realizadas+top.chats)>0) extra.push(`${top.agente} teve o maior volume de atendimentos (${fmtNum(top.recebidas+top.realizadas+top.chats)})`);
     const avaliados = ag.filter(a=>a.satN>=5 && isFinite(a.satMedia)).sort((a,b)=>b.satMedia-a.satMedia);
     if(avaliados.length>=2){
       extra.push(`a melhor satisfação foi de ${avaliados[0].agente} (${fmtPct(avaliados[0].satMedia)})`);
-      const pior = avaliados[avaliados.length-1];
-      if(pior.satMedia < 0.8) extra.push(`a menor foi de ${pior.agente} (${fmtPct(pior.satMedia)}), que merece acompanhamento`);
-    }
-    const exc = ag.filter(a=>a.pausaExc>0).sort((a,b)=>b.pausaExc-a.pausaExc);
-    const totExc = sum(exc.map(a=>a.pausaExc));
-    if(exc.length){
-      const tops = exc.slice(0,2);
-      extra.push(`das ${fmtNum(totExc)} pausas acima do limite, ${fmtNum(sum(tops.map(a=>a.pausaExc)))} foram de ${relLista(tops.map(a=>a.agente))}`);
+      extra.push(`a menor, de ${avaliados[avaliados.length-1].agente} (${fmtPct(avaliados[avaliados.length-1].satMedia)})`);
     }
     if(extra.length) p.push(`Por agente: ${relLista(extra)}.`);
   }
@@ -2158,33 +2303,40 @@ function relMontar(tipo, alvo, mes, setor){
   const prv = relDados(tipo, alvo, ant, setor);
   const rel = { tipo, alvo, mes, ant, cur, prv, setorFixo: setor||"",
     agentes: tipo==="setor" ? relAgentes(cur.rows) : [],
-    pausasTipo: computePausasPorTipo(cur.rows.pau),
+    pausasTipo: relPausasPorTipo(cur.rows.pau), pausasTipoPrev: relPausasPorTipo(prv.rows.pau),
     setores: tipo==="agente" ? (setor ? [setor] : Array.from(new Set(Object.values(cur.rows).flat().map(r=>String(r.setor||"").trim()).filter(Boolean))).sort()) : [] };
   rel.parecer = relParecer(rel);
   return rel;
 }
 let relAtual = null;
+function relClasseAval(c){ return (c.sinal>0 || c.aval==="Sem ocorrências") ? "rel-up" : c.sinal<0 ? "rel-down" : "rel-muted"; }
+const REL_NOTA = `Meta de 90% para satisfação, NPS, taxa de resolução e monitoria; "muito abaixo" significa 10 p.p. ou mais abaixo da meta. `+
+  `Pausas: tolerância de ${PAUSA_TOLERANCIA_SEG} segundos sobre o limite; acima disso é falta grave, e a redução do índice não é considerada melhora enquanto houver ocorrências. `+
+  `Médias por agente/dia: total dividido pelos dias em que cada agente teve registros.`;
 function relDocHtml(r, parecerHtml, editavel){
   const antL = monthLabelFromISO(r.ant), mesL = monthLabelFromISO(r.mes);
   const prev = Object.fromEntries(r.prv.ind.map(i=>[i.k, i.v]));
   const linhasInd = REL_GRUPOS.map(g=>{
     const itens = r.cur.ind.filter(i=>i.g===g);
-    if(!r.cur.tem[g] && !r.prv.tem[g]) return `<tr class="rel-grp"><td colspan="5">${g} <span class="rel-muted">— sem registros</span></td></tr>`;
-    return `<tr class="rel-grp"><td colspan="5">${g}</td></tr>` + itens.map(i=>{
-      const c = relComparar(i, prev[i.k]);
-      const cls = c.aval==="Melhorou" ? "rel-up" : c.aval==="Piorou" ? "rel-down" : "rel-muted";
-      return `<tr><td>${i.l}</td><td class="rel-n">${relFmt(prev[i.k], i.f)}</td><td class="rel-n"><b>${relFmt(i.v, i.f)}</b></td><td class="rel-n">${c.txt}</td><td class="${cls}">${c.aval||""}</td></tr>`;
+    if(!r.cur.tem[g] && !r.prv.tem[g]) return `<tr class="rel-grp"><td colspan="6">${g} <span class="rel-muted">— sem registros</span></td></tr>`;
+    return `<tr class="rel-grp"><td colspan="6">${g}</td></tr>` + itens.map(i=>{
+      const c = relComparar(i, prev[i.k]), m = i.meta ? relMeta(i.v) : null;
+      return `<tr${c.urgente ? ' class="rel-urgente"' : ""}><td>${i.l}${i.meta ? ` <span class="rel-muted">(meta 90%)</span>` : ""}</td><td class="rel-n">${relFmt(prev[i.k], i.f)}</td><td class="rel-n"><b>${relFmt(i.v, i.f)}</b></td><td class="rel-n">${c.txt}</td><td class="${relClasseAval(c)}">${c.aval||""}</td><td class="rel-n ${relMetaCls(m)}">${relMetaTxt(m)}</td></tr>`;
     }).join("");
   }).join("");
-  const tabAgentes = r.agentes.length ? `<h3 class="rel-h">Resultado por agente — ${mesL}</h3>
-    <table class="rel-table"><thead><tr><th>Agente</th><th>Recebidas atendidas</th><th>Realizadas (tentativas)</th><th>Realizadas (1 min+)</th><th>Chats</th><th>Satisfação</th><th>NPS</th><th>Monitoria</th><th>Tempo em pausa</th><th>Pausas acima do limite</th></tr></thead>
-    <tbody>${r.agentes.map(a=>`<tr><td><b>${esc(a.agente)}</b></td><td class="rel-n">${fmtNum(a.recebidas)}</td><td class="rel-n">${fmtNum(a.tentativas)}</td><td class="rel-n">${fmtNum(a.realizadas)}</td><td class="rel-n">${fmtNum(a.chats)}</td>
-      <td class="rel-n">${isFinite(a.satMedia)?fmtPct(a.satMedia)+` <span class="rel-muted">(${a.satN})</span>`:"—"}</td><td class="rel-n">${relFmt(a.npsMedia,"pct")}</td><td class="rel-n">${relFmt(a.monMedia,"pct")}</td>
-      <td class="rel-n">${a.pausaTotal?fmtSec(a.pausaTotal):"—"}</td><td class="rel-n">${fmtNum(a.pausaExc)}</td></tr>`).join("")}</tbody></table>` : "";
+  const celMeta = (val, n) => { const m = relMeta(val); return `<td class="rel-n ${relMetaCls(m)}">${isFinite(val) ? fmtPct(val) + (n!=null ? ` <span class="rel-muted">(${n})</span>` : "") : "—"}</td>`; };
+  const tabAgentes = r.agentes.length ? `<h3 class="rel-h">Atendimento por agente — ${mesL}</h3>
+    <table class="rel-table"><thead><tr><th>Agente</th><th>Recebidas atendidas</th><th>Recebidas/dia</th><th>Nível de serviço (20s)</th><th>Realizadas (tentativas)</th><th>Realizadas/dia</th><th>Realizadas (1 min+)</th><th>Chats</th><th>Chat/dia</th></tr></thead>
+    <tbody>${r.agentes.map(a=>`<tr><td><b>${esc(a.agente)}</b></td><td class="rel-n">${fmtNum(a.recebidas)}</td><td class="rel-n">${relFmt(a.recebidasDia,"dec1")}</td><td class="rel-n">${relFmt(a.nivelServ,"pct100")}</td>
+      <td class="rel-n">${fmtNum(a.tentativas)}</td><td class="rel-n">${relFmt(a.realizadasDia,"dec1")}</td><td class="rel-n">${fmtNum(a.realizadas)}</td><td class="rel-n">${fmtNum(a.chats)}</td><td class="rel-n">${relFmt(a.chatDia,"dec1")}</td></tr>`).join("")}</tbody></table>
+    <h3 class="rel-h">Qualidade e pausas por agente — ${mesL}</h3>
+    <table class="rel-table"><thead><tr><th>Agente</th><th>Satisfação</th><th>NPS</th><th>Taxa de resolução</th><th>Monitoria</th><th>Tempo em pausa</th><th>Pausas em falta grave</th></tr></thead>
+    <tbody>${r.agentes.map(a=>`<tr><td><b>${esc(a.agente)}</b></td>${celMeta(a.satMedia, a.satN)}${celMeta(a.npsMedia, a.npsN)}${celMeta(a.resPct, a.resN)}${celMeta(a.monMedia, a.monN)}
+      <td class="rel-n">${a.pausaTotal ? fmtSec(a.pausaTotal) : "—"}</td><td class="rel-n ${a.pausaExc>0 ? "rel-meta-muito" : ""}">${fmtNum(a.pausaExc)}</td></tr>`).join("")}</tbody></table>` : "";
   const tabPausas = r.pausasTipo.length ? `<h3 class="rel-h">Pausas por tipo — ${mesL}</h3>
-    <table class="rel-table"><thead><tr><th>Tipo</th><th>Quantidade</th><th>Tempo total</th><th>Média</th><th>Limite</th><th>Acima do limite</th></tr></thead>
+    <table class="rel-table"><thead><tr><th>Tipo</th><th>Quantidade</th><th>Tempo total</th><th>Média</th><th>Limite</th><th>Falta grave (limite + ${PAUSA_TOLERANCIA_SEG}s)</th><th>% em falta grave</th></tr></thead>
     <tbody>${r.pausasTipo.map(t=>`<tr><td>${esc(t.tipo)}</td><td class="rel-n">${fmtNum(t.count)}</td><td class="rel-n">${fmtSec(t.totalSec)}</td><td class="rel-n">${fmtSec(t.media)}</td>
-      <td class="rel-n">${t.limite?fmtSec(t.limite)+(t.alertOnly?" (alerta)":""):"—"}</td><td class="rel-n">${t.alertOnly?"—":fmtNum(t.excedentesCount)}</td></tr>`).join("")}</tbody></table>` : "";
+      <td class="rel-n">${t.limite ? fmtSec(t.limite)+(t.alertOnly?" (alerta)":"") : "—"}</td><td class="rel-n ${t.excedentesCount>0 ? "rel-meta-muito" : ""}">${t.alertOnly ? "—" : fmtNum(t.excedentesCount)}</td><td class="rel-n">${isFinite(t.pctExc) ? fmtPct(t.pctExc) : "—"}</td></tr>`).join("")}</tbody></table>` : "";
   return `<div class="rel-head">
       <div class="rel-logo-box"><img src="logo.png" alt="" class="rel-logo" onerror="this.parentElement.style.display='none'"></div>
       <div><div class="rel-title">Relatório de desempenho — ${r.tipo==="setor"?"Setor":"Agente"}: ${esc(r.alvo)}</div>
@@ -2193,11 +2345,12 @@ function relDocHtml(r, parecerHtml, editavel){
     <h3 class="rel-h">Parecer</h3>
     <div class="rel-parecer"${editavel ? ` id="relParecer" contenteditable="true" spellcheck="true"` : ""}>${parecerHtml}</div>
     <h3 class="rel-h">Indicadores — ${mesL} x ${antL}</h3>
-    <table class="rel-table"><thead><tr><th>Indicador</th><th>${antL}</th><th>${mesL}</th><th>Variação</th><th>Avaliação</th></tr></thead><tbody>${linhasInd}</tbody></table>
+    <table class="rel-table"><thead><tr><th>Indicador</th><th>${antL}</th><th>${mesL}</th><th>Variação</th><th>Avaliação</th><th>Meta</th></tr></thead><tbody>${linhasInd}</tbody></table>
+    <p class="rel-nota">${REL_NOTA}</p>
     ${tabAgentes}
     ${tabPausas}`;
 }
-const relParecerHtml = linhas => linhas.map(t=>`<p>${esc(t)}</p>`).join("");
+const relParecerHtml = linhas => linhas.map(t=>`<p${t.indexOf("⚠")===0 ? ' class="rel-alerta"' : ""}>${esc(t)}</p>`).join("");
 function renderRelatorios(content){
   if(!(perfilAtual && perfilAtual.is_admin)){
     content.innerHTML = `<div class="empty-state"><h3>Área restrita ao administrador</h3></div>`; return;
@@ -2269,14 +2422,15 @@ function relSheetResumo(r, parecer){
     [`Competência: ${mesL} · comparado a ${antL}${r.setores.length?` · Setor(es): ${r.setores.join(", ")}`:""}`],
     [`Gerado em ${new Date().toLocaleDateString('pt-BR')}`], [],
     ["Parecer"], ...parecer.map(t=>[t]), [],
-    ["Grupo","Indicador", antL, mesL, "Variação", "Avaliação"]
+    ["Grupo","Indicador", antL, mesL, "Variação", "Avaliação", "Meta", "Situação da meta"]
   ];
-  r.cur.ind.forEach(i=>{ const c = relComparar(i, prev[i.k]); linhas.push([i.g, i.l, relFmt(prev[i.k], i.f), relFmt(i.v, i.f), c.txt, c.aval]); });
+  r.cur.ind.forEach(i=>{ const c = relComparar(i, prev[i.k]); linhas.push([i.g, i.l, relFmt(prev[i.k], i.f), relFmt(i.v, i.f), c.txt, c.aval, i.meta ? "90%" : "", i.meta ? relMetaTxt(relMeta(i.v)) : ""]); });
+  linhas.push([], [REL_NOTA]);
   if(r.tipo==="agente" && r.pausasTipo.length){
-    linhas.push([], ["Pausas por tipo"], ["Tipo","Quantidade","Tempo total","Média","Limite","Acima do limite"]);
-    r.pausasTipo.forEach(t=>linhas.push([t.tipo, t.count, fmtSec(t.totalSec), fmtSec(t.media), t.limite?fmtSec(t.limite)+(t.alertOnly?" (alerta)":""):"", t.alertOnly?"":t.excedentesCount]));
+    linhas.push([], ["Pausas por tipo"], ["Tipo","Quantidade","Tempo total","Média","Limite",`Falta grave (limite + ${PAUSA_TOLERANCIA_SEG}s)`,"% em falta grave"]);
+    r.pausasTipo.forEach(t=>linhas.push([t.tipo, t.count, fmtSec(t.totalSec), fmtSec(t.media), t.limite?fmtSec(t.limite)+(t.alertOnly?" (alerta)":""):"", t.alertOnly?"":t.excedentesCount, isFinite(t.pctExc)?fmtPct(t.pctExc):""]));
   }
-  const ws = XLSX.utils.aoa_to_sheet(linhas); ws['!cols'] = [{wch:22},{wch:42},{wch:16},{wch:16},{wch:14},{wch:12}];
+  const ws = XLSX.utils.aoa_to_sheet(linhas); ws['!cols'] = [{wch:22},{wch:48},{wch:16},{wch:16},{wch:14},{wch:20},{wch:8},{wch:30}];
   return ws;
 }
 async function relBaixarExcel(todos){
@@ -2288,16 +2442,17 @@ async function relBaixarExcel(todos){
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, relSheetResumo(r, relTextoParecer()), r.tipo==="setor" ? "Setor" : "Resumo");
     if(r.agentes.length){
-      const ag = [["Agente","Recebidas atendidas","Realizadas (tentativas)","Realizadas (1 min+)","Chats","Satisfação média","Avaliações","NPS","Monitoria","Tempo em pausa","Pausas acima do limite"]]
-        .concat(r.agentes.map(a=>[a.agente, a.recebidas, a.tentativas, a.realizadas, a.chats, relFmt(a.satMedia,"pct"), a.satN,
-          relFmt(a.npsMedia,"pct"), relFmt(a.monMedia,"pct"), a.pausaTotal?fmtSec(a.pausaTotal):"", a.pausaExc]));
-      const w2 = XLSX.utils.aoa_to_sheet(ag); w2['!cols'] = [{wch:28}].concat(new Array(10).fill({wch:16}));
+      const ag = [["Agente","Recebidas atendidas","Recebidas/dia","Nível de serviço (20s)","Realizadas (tentativas)","Realizadas/dia","Realizadas (1 min+)","Chats","Chat/dia",
+          "Satisfação média","Avaliações","NPS","Taxa de resolução","Monitoria","Tempo em pausa","Pausas em falta grave"]]
+        .concat(r.agentes.map(a=>[a.agente, a.recebidas, relFmt(a.recebidasDia,"dec1"), relFmt(a.nivelServ,"pct100"), a.tentativas, relFmt(a.realizadasDia,"dec1"), a.realizadas, a.chats, relFmt(a.chatDia,"dec1"),
+          relFmt(a.satMedia,"pct"), a.satN, relFmt(a.npsMedia,"pct"), relFmt(a.resPct,"pct"), relFmt(a.monMedia,"pct"), a.pausaTotal?fmtSec(a.pausaTotal):"", a.pausaExc]));
+      const w2 = XLSX.utils.aoa_to_sheet(ag); w2['!cols'] = [{wch:28}].concat(new Array(15).fill({wch:16}));
       XLSX.utils.book_append_sheet(wb, w2, "Por agente");
     }
     if(r.tipo==="setor" && r.pausasTipo.length){
-      const pt = [["Tipo","Quantidade","Tempo total","Média","Limite","Acima do limite"]]
-        .concat(r.pausasTipo.map(t=>[t.tipo, t.count, fmtSec(t.totalSec), fmtSec(t.media), t.limite?fmtSec(t.limite)+(t.alertOnly?" (alerta)":""):"", t.alertOnly?"":t.excedentesCount]));
-      const w3 = XLSX.utils.aoa_to_sheet(pt); w3['!cols'] = [{wch:28}].concat(new Array(5).fill({wch:14}));
+      const pt = [["Tipo","Quantidade","Tempo total","Média","Limite",`Falta grave (limite + ${PAUSA_TOLERANCIA_SEG}s)`,"% em falta grave"]]
+        .concat(r.pausasTipo.map(t=>[t.tipo, t.count, fmtSec(t.totalSec), fmtSec(t.media), t.limite?fmtSec(t.limite)+(t.alertOnly?" (alerta)":""):"", t.alertOnly?"":t.excedentesCount, isFinite(t.pctExc)?fmtPct(t.pctExc):""]));
+      const w3 = XLSX.utils.aoa_to_sheet(pt); w3['!cols'] = [{wch:28}].concat(new Array(6).fill({wch:16}));
       XLSX.utils.book_append_sheet(wb, w3, "Pausas por tipo");
     }
     if(todos){
