@@ -270,6 +270,7 @@ table.data-table tbody tr:hover{background:#FAFAFD;}
 
 /* ---------- RELATÓRIOS ---------- */
 .rel-controls{margin-bottom:12px;flex-wrap:wrap;}
+.rel-combo{align-items:center;gap:10px;font-size:12.5px;color:var(--text-muted);}
 .rel-doc{background:#fff;color:#1C1F26;border:1px solid #E7E8EF;border-radius:12px;padding:28px 32px;max-width:1000px;font-family:'Inter',sans-serif;}
 .rel-doc.rel-exportando{border:none;border-radius:0;padding:0;max-width:none;}
 .rel-head{display:flex;align-items:center;gap:16px;border-bottom:3px solid #7063F0;padding-bottom:14px;margin-bottom:6px;}
@@ -1960,17 +1961,18 @@ async function refreshAllData(){
 const relUI = { tipo:"setor", alvo:"", mes:"" };
 const REL_GRUPOS = ["Chamadas recebidas","Chamadas realizadas","Chat","Satisfação","Monitoria","Pausas"];
 function relPrevMes(iso){ const [y,m] = iso.split("-").map(Number); return monthKeyISO(new Date(y, m-2, 1)); }
-function relRows(key, tipo, alvo, mes){
+function relRows(key, tipo, alvo, mes, setor){
   return (state.rows[key]||[]).filter(r=> r._date && monthKeyISO(r._date)===mes &&
-    String(tipo==="setor" ? (r.setor||"") : (r.agente||"")).trim()===alvo);
+    String(tipo==="setor" ? (r.setor||"") : (r.agente||"")).trim()===alvo &&
+    (!setor || String(r.setor||"").trim()===setor));
 }
 function relPausas(rows){
   let exc = 0, controladas = 0;
   rows.forEach(r=>{ const lim = pauseLimitSecFor(r.tipo, r.setor); if(lim && !pauseIsAlertOnly(r.tipo)){ controladas++; if(r._sec>lim) exc++; } });
   return { total: sum(rows.map(r=>r._sec)), media: avg(rows.map(r=>r._sec)), count: rows.length, exc, pctExc: controladas ? exc/controladas : NaN };
 }
-function relDados(tipo, alvo, mes){
-  const g = k => relRows(k, tipo, alvo, mes);
+function relDados(tipo, alvo, mes, setor){
+  const g = k => relRows(k, tipo, alvo, mes, setor);
   const rows = { rec:g('received'), made:g('made'), chat:g('chat'), perf:g('chatPerf'), sat:g('satisfaction'), mon:g('monitoring'), pau:g('pause') };
   const R = computeReceivedMetrics(rows.rec), M = computeMadeMetrics(rows.made), P = computeChatPerfMetrics(rows.perf);
   const S = computeSatisfacao(rows.sat), Rs = computeResolucao(rows.sat), N = computeNps(rows.sat), Mo = computeMonitoria(rows.mon);
@@ -2054,13 +2056,55 @@ function relAgentes(rows){
 }
 function relMesTxt(iso){ const [y,m] = iso.split("-"); return MESES_PT_LONG[+m-1].toLowerCase()+" de "+y; }
 function relLista(itens){ return itens.length<=1 ? itens.join("") : itens.slice(0,-1).join("; ")+" e "+itens[itens.length-1]; }
+/* Peso de cada grupo na visão geral: atendimento ao cliente e satisfação pesam mais que pausas. */
+const REL_PESOS = { "Chamadas recebidas":3, "Satisfação":3, "Chat":2, "Monitoria":2, "Chamadas realizadas":1.5, "Pausas":1 };
+function relVisaoGeral(rel){
+  const prev = Object.fromEntries(rel.prv.ind.map(i=>[i.k, i.v]));
+  const grupos = [];
+  let somaPeso = 0, somaNota = 0, melhorou = 0, piorou = 0, estavel = 0;
+  REL_GRUPOS.forEach(g=>{
+    const sinais = rel.cur.ind.filter(i=>i.g===g && i.dir!==0).map(i=>relComparar(i, prev[i.k])).filter(c=>c.aval)
+      .map(c=>c.aval==="Melhorou" ? 1 : c.aval==="Piorou" ? -1 : 0);
+    if(!sinais.length) return;
+    sinais.forEach(x=>{ if(x>0) melhorou++; else if(x<0) piorou++; else estavel++; });
+    const nota = sinais.reduce((a,b)=>a+b,0)/sinais.length;
+    grupos.push({g, nota});
+    somaPeso += REL_PESOS[g]; somaNota += REL_PESOS[g]*nota;
+  });
+  if(!grupos.length) return null;
+  const total = melhorou+piorou+estavel;
+  /* metade pelo peso de cada grupo, metade pela contagem simples de indicadores */
+  const geral = 0.5*(somaNota/somaPeso) + 0.5*(total ? (melhorou-piorou)/total : 0);
+  const nomeG = g => g.charAt(0).toLowerCase()+g.slice(1);
+  const bons = grupos.filter(x=>x.nota>=0.34).map(x=>nomeG(x.g));
+  const ruins = grupos.filter(x=>x.nota<=-0.34).map(x=>nomeG(x.g));
+  let resultado;
+  if(geral>=0.5) resultado = "positivo";
+  else if(geral>=0.15) resultado = "levemente positivo";
+  else if(geral>-0.15) resultado = "estável, com melhoras e pioras que se equilibram";
+  else if(geral>-0.5) resultado = "levemente negativo";
+  else resultado = "negativo";
+  return { geral, resultado, bons, ruins, melhorou, piorou, estavel };
+}
 function relParecer(rel){
   const mesL = relMesTxt(rel.mes), antL = relMesTxt(rel.ant), antCurto = antL.split(" ")[0];
-  const quem = rel.tipo==="setor" ? `o setor ${rel.alvo}` : `o(a) agente ${rel.alvo}`;
+  const quem = rel.tipo==="setor" ? `o setor ${rel.alvo}` : `o(a) agente ${rel.alvo}${rel.setorFixo ? ` no setor ${rel.setorFixo}` : ""}`;
   const ind = rel.cur.ind, prev = Object.fromEntries(rel.prv.ind.map(i=>[i.k, i.v]));
   const v = k => ind.find(i=>i.k===k);
   const temAnterior = REL_GRUPOS.some(g=>rel.prv.tem[g]);
   const p = [];
+  const vg = temAnterior ? relVisaoGeral(rel) : null;
+  if(vg){
+    const total = vg.melhorou+vg.piorou+vg.estavel;
+    const doQuem = quem.replace(/^o\(a\) /, "do(a) ").replace(/^o /, "do ");
+    const pl = (n, um, varios) => `${n} ${n===1 ? um : varios}`;
+    let t = `Visão geral: o resultado ${doQuem} em ${mesL}, comparado a ${antL}, foi ${vg.resultado}. `+
+      `Dos ${total} indicadores comparáveis, ${pl(vg.melhorou,"melhorou","melhoraram")}, ${pl(vg.piorou,"piorou","pioraram")} e ${pl(vg.estavel,"ficou estável","ficaram estáveis")}.`;
+    if(vg.bons.length && vg.ruins.length) t += ` Os avanços se concentraram em ${relLista(vg.bons)}, enquanto houve piora em ${relLista(vg.ruins)}.`;
+    else if(vg.bons.length) t += ` Os avanços se concentraram em ${relLista(vg.bons)}.`;
+    else if(vg.ruins.length) t += ` A piora se concentrou em ${relLista(vg.ruins)}.`;
+    p.push(t);
+  }
 
   const partes = [];
   const vol = (k, nome) => { const i = v(k); if(!isFinite(i.v)) return;
@@ -2107,39 +2151,20 @@ function relParecer(rel){
   if(vazios.length) p.push(`Sem registros na competência: ${relLista(vazios)}.`);
   return p;
 }
-function relMontar(){
-  const ant = relPrevMes(relUI.mes);
-  const cur = relDados(relUI.tipo, relUI.alvo, relUI.mes);
-  const prv = relDados(relUI.tipo, relUI.alvo, ant);
-  const rel = { tipo:relUI.tipo, alvo:relUI.alvo, mes:relUI.mes, ant, cur, prv,
-    agentes: relUI.tipo==="setor" ? relAgentes(cur.rows) : [],
+/* setor (opcional): no relatório de agente, limita aos registros daquele setor. */
+function relMontar(tipo, alvo, mes, setor){
+  const ant = relPrevMes(mes);
+  const cur = relDados(tipo, alvo, mes, setor);
+  const prv = relDados(tipo, alvo, ant, setor);
+  const rel = { tipo, alvo, mes, ant, cur, prv, setorFixo: setor||"",
+    agentes: tipo==="setor" ? relAgentes(cur.rows) : [],
     pausasTipo: computePausasPorTipo(cur.rows.pau),
-    setores: relUI.tipo==="agente" ? Array.from(new Set(Object.values(cur.rows).flat().map(r=>String(r.setor||"").trim()).filter(Boolean))).sort() : [] };
+    setores: tipo==="agente" ? (setor ? [setor] : Array.from(new Set(Object.values(cur.rows).flat().map(r=>String(r.setor||"").trim()).filter(Boolean))).sort()) : [] };
   rel.parecer = relParecer(rel);
   return rel;
 }
 let relAtual = null;
-function renderRelatorios(content){
-  if(!(perfilAtual && perfilAtual.is_admin)){
-    content.innerHTML = `<div class="empty-state"><h3>Área restrita ao administrador</h3></div>`; return;
-  }
-  if(!hasAnyData()){ content.innerHTML = emptyState(); return; }
-  const meses = allMonthsAvailable().slice().reverse();
-  if(!meses.includes(relUI.mes)) relUI.mes = meses[0] || "";
-  const alvos = relUI.tipo==="setor" ? allSetores() : allAgentes();
-  if(!alvos.includes(relUI.alvo)) relUI.alvo = alvos[0] || "";
-  const controles = `<div class="proto-controls rel-controls">
-    <select class="filter-select" id="relTipo"><option value="setor">Relatório por setor</option><option value="agente">Relatório por agente</option></select>
-    <select class="filter-select" id="relAlvo">${alvos.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join("")}</select>
-    <select class="filter-select" id="relMes">${meses.map(m=>`<option value="${m}">${monthLabelFromISO(m)}</option>`).join("")}</select>
-    <span style="flex:1"></span>
-    <button class="btn btn-ghost btn-sm" id="relRefazer" title="Descarta suas edições e gera o parecer de novo">↺ Refazer parecer</button>
-    <button class="btn btn-ghost btn-sm" id="relExcel">⬇ Excel</button>
-    <button class="btn btn-primary btn-sm" id="relPdf">⬇ PDF</button>
-  </div>`;
-  if(!relUI.mes || !relUI.alvo){ content.innerHTML = controles + `<p class="proto-note">Não há dados suficientes para montar o relatório.</p>`; relBind(content); return; }
-  relAtual = relMontar();
-  const r = relAtual;
+function relDocHtml(r, parecerHtml, editavel){
   const antL = monthLabelFromISO(r.ant), mesL = monthLabelFromISO(r.mes);
   const prev = Object.fromEntries(r.prv.ind.map(i=>[i.k, i.v]));
   const linhasInd = REL_GRUPOS.map(g=>{
@@ -2160,21 +2185,47 @@ function renderRelatorios(content){
     <table class="rel-table"><thead><tr><th>Tipo</th><th>Quantidade</th><th>Tempo total</th><th>Média</th><th>Limite</th><th>Acima do limite</th></tr></thead>
     <tbody>${r.pausasTipo.map(t=>`<tr><td>${esc(t.tipo)}</td><td class="rel-n">${fmtNum(t.count)}</td><td class="rel-n">${fmtSec(t.totalSec)}</td><td class="rel-n">${fmtSec(t.media)}</td>
       <td class="rel-n">${t.limite?fmtSec(t.limite)+(t.alertOnly?" (alerta)":""):"—"}</td><td class="rel-n">${t.alertOnly?"—":fmtNum(t.excedentesCount)}</td></tr>`).join("")}</tbody></table>` : "";
-  content.innerHTML = controles + `
-  <p class="proto-note">O parecer abaixo é gerado automaticamente a partir dos números. <b>Clique no texto para editar</b> antes de baixar o PDF ou o Excel. Ao trocar o setor, o agente ou a competência, o parecer é gerado de novo.</p>
-  <div class="rel-doc" id="relDoc">
-    <div class="rel-head">
+  return `<div class="rel-head">
       <div class="rel-logo-box"><img src="logo.png" alt="" class="rel-logo" onerror="this.parentElement.style.display='none'"></div>
       <div><div class="rel-title">Relatório de desempenho — ${r.tipo==="setor"?"Setor":"Agente"}: ${esc(r.alvo)}</div>
-      <div class="rel-sub">Competência: <b>${mesL}</b> · comparado a ${antL}${r.setores.length?` · Setor(es): ${esc(r.setores.join(", "))}`:""} · gerado em ${new Date().toLocaleDateString('pt-BR')}</div></div>
+      <div class="rel-sub">Competência: <b>${mesL}</b> · comparado a ${antL}${r.setores.length?` · Setor${r.setores.length>1?"es":""}: ${esc(r.setores.join(", "))}`:""} · gerado em ${new Date().toLocaleDateString('pt-BR')}</div></div>
     </div>
     <h3 class="rel-h">Parecer</h3>
-    <div class="rel-parecer" id="relParecer" contenteditable="true" spellcheck="true">${r.parecer.map(t=>`<p>${esc(t)}</p>`).join("")}</div>
+    <div class="rel-parecer"${editavel ? ` id="relParecer" contenteditable="true" spellcheck="true"` : ""}>${parecerHtml}</div>
     <h3 class="rel-h">Indicadores — ${mesL} x ${antL}</h3>
     <table class="rel-table"><thead><tr><th>Indicador</th><th>${antL}</th><th>${mesL}</th><th>Variação</th><th>Avaliação</th></tr></thead><tbody>${linhasInd}</tbody></table>
     ${tabAgentes}
-    ${tabPausas}
-  </div>`;
+    ${tabPausas}`;
+}
+const relParecerHtml = linhas => linhas.map(t=>`<p>${esc(t)}</p>`).join("");
+function renderRelatorios(content){
+  if(!(perfilAtual && perfilAtual.is_admin)){
+    content.innerHTML = `<div class="empty-state"><h3>Área restrita ao administrador</h3></div>`; return;
+  }
+  if(!hasAnyData()){ content.innerHTML = emptyState(); return; }
+  const meses = allMonthsAvailable().slice().reverse();
+  if(!meses.includes(relUI.mes)) relUI.mes = meses[0] || "";
+  const alvos = relUI.tipo==="setor" ? allSetores() : allAgentes();
+  if(!alvos.includes(relUI.alvo)) relUI.alvo = alvos[0] || "";
+  const controles = `<div class="proto-controls rel-controls">
+    <select class="filter-select" id="relTipo"><option value="setor">Relatório por setor</option><option value="agente">Relatório por agente</option></select>
+    <select class="filter-select" id="relAlvo">${alvos.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join("")}</select>
+    <select class="filter-select" id="relMes">${meses.map(m=>`<option value="${m}">${monthLabelFromISO(m)}</option>`).join("")}</select>
+    <span style="flex:1"></span>
+    <button class="btn btn-ghost btn-sm" id="relRefazer" title="Descarta suas edições e gera o parecer de novo">↺ Refazer parecer</button>
+    <button class="btn btn-ghost btn-sm" id="relExcel">⬇ Excel</button>
+    <button class="btn btn-primary btn-sm" id="relPdf">⬇ PDF</button>
+  </div>
+  ${relUI.tipo==="setor" ? `<div class="proto-controls rel-controls rel-combo">
+    <span><b>Setor + cada agente</b> em um único arquivo (primeiro o setor, depois uma página por agente):</span>
+    <button class="btn btn-ghost btn-sm" id="relExcelTodos">⬇ Excel completo</button>
+    <button class="btn btn-primary btn-sm" id="relPdfTodos">⬇ PDF completo</button>
+  </div>` : ""}`;
+  if(!relUI.mes || !relUI.alvo){ content.innerHTML = controles + `<p class="proto-note">Não há dados suficientes para montar o relatório.</p>`; relBind(content); return; }
+  relAtual = relMontar(relUI.tipo, relUI.alvo, relUI.mes);
+  content.innerHTML = controles + `
+  <p class="proto-note">O parecer abaixo é gerado automaticamente a partir dos números. <b>Clique no texto para editar</b> antes de baixar o PDF ou o Excel. Ao trocar o setor, o agente ou a competência, o parecer é gerado de novo.${relUI.tipo==="setor" ? " No arquivo completo, o parecer do setor sai com as suas edições e os dos agentes saem como gerados automaticamente." : ""}</p>
+  <div class="rel-doc" id="relDoc">${relDocHtml(relAtual, relParecerHtml(relAtual.parecer), true)}</div>`;
   relBind(content);
 }
 function relBind(content){
@@ -2184,12 +2235,18 @@ function relBind(content){
   $('relAlvo').addEventListener('change', e=>{ relUI.alvo = e.target.value; renderRelatorios(content); });
   $('relMes').addEventListener('change', e=>{ relUI.mes = e.target.value; renderRelatorios(content); });
   $('relRefazer').addEventListener('click', ()=>renderRelatorios(content));
-  $('relExcel').addEventListener('click', relBaixarExcel);
-  $('relPdf').addEventListener('click', relBaixarPdf);
+  $('relExcel').addEventListener('click', ()=>relBaixarExcel(false));
+  $('relPdf').addEventListener('click', ()=>relBaixarPdf(false));
+  if($('relExcelTodos')) $('relExcelTodos').addEventListener('click', ()=>relBaixarExcel(true));
+  if($('relPdfTodos')) $('relPdfTodos').addEventListener('click', ()=>relBaixarPdf(true));
 }
-function relNomeArquivo(ext){
-  const limpo = s => String(s).normalize("NFD").replace(/[̀-ͯ]/g,"").replace(/[^A-Za-z0-9]+/g,"_").replace(/^_|_$/g,"");
-  return `Relatorio_${relAtual.tipo==="setor"?"Setor":"Agente"}_${limpo(relAtual.alvo)}_${relAtual.mes}.${ext}`;
+function relNomeArquivo(ext, todos){
+  const limpo = s => String(s).normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^A-Za-z0-9]+/g,"_").replace(/^_|_$/g,"");
+  return `Relatorio_${relAtual.tipo==="setor"?"Setor":"Agente"}_${limpo(relAtual.alvo)}${todos?"_com_agentes":""}_${relAtual.mes}.${ext}`;
+}
+/* Relatórios de cada agente do setor, limitados aos registros daquele setor. */
+function relAgentesDoSetor(){
+  return relAtual.agentes.map(a=>relMontar("agente", a.agente, relAtual.mes, relAtual.alvo));
 }
 function relTextoParecer(){
   const el = document.getElementById('relParecer');
@@ -2204,24 +2261,32 @@ function carregarScript(src){
   });
   return _scriptsCarregados[src];
 }
-async function relBaixarExcel(){
+function relSheetResumo(r, parecer){
+  const mesL = monthLabelFromISO(r.mes), antL = monthLabelFromISO(r.ant);
+  const prev = Object.fromEntries(r.prv.ind.map(i=>[i.k, i.v]));
+  const linhas = [
+    [`Relatório de desempenho — ${r.tipo==="setor"?"Setor":"Agente"}: ${r.alvo}`],
+    [`Competência: ${mesL} · comparado a ${antL}${r.setores.length?` · Setor(es): ${r.setores.join(", ")}`:""}`],
+    [`Gerado em ${new Date().toLocaleDateString('pt-BR')}`], [],
+    ["Parecer"], ...parecer.map(t=>[t]), [],
+    ["Grupo","Indicador", antL, mesL, "Variação", "Avaliação"]
+  ];
+  r.cur.ind.forEach(i=>{ const c = relComparar(i, prev[i.k]); linhas.push([i.g, i.l, relFmt(prev[i.k], i.f), relFmt(i.v, i.f), c.txt, c.aval]); });
+  if(r.tipo==="agente" && r.pausasTipo.length){
+    linhas.push([], ["Pausas por tipo"], ["Tipo","Quantidade","Tempo total","Média","Limite","Acima do limite"]);
+    r.pausasTipo.forEach(t=>linhas.push([t.tipo, t.count, fmtSec(t.totalSec), fmtSec(t.media), t.limite?fmtSec(t.limite)+(t.alertOnly?" (alerta)":""):"", t.alertOnly?"":t.excedentesCount]));
+  }
+  const ws = XLSX.utils.aoa_to_sheet(linhas); ws['!cols'] = [{wch:22},{wch:42},{wch:16},{wch:16},{wch:14},{wch:12}];
+  return ws;
+}
+async function relBaixarExcel(todos){
   if(!relAtual) return;
-  const btn = document.getElementById('relExcel'); btn.disabled = true;
+  const btn = document.getElementById(todos ? 'relExcelTodos' : 'relExcel'); btn.disabled = true;
   try{
     await carregarScript("https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js");
-    const r = relAtual, mesL = monthLabelFromISO(r.mes), antL = monthLabelFromISO(r.ant);
-    const prev = Object.fromEntries(r.prv.ind.map(i=>[i.k, i.v]));
-    const resumo = [
-      [`Relatório de desempenho — ${r.tipo==="setor"?"Setor":"Agente"}: ${r.alvo}`],
-      [`Competência: ${mesL} · comparado a ${antL}${r.setores.length?` · Setor(es): ${r.setores.join(", ")}`:""}`],
-      [`Gerado em ${new Date().toLocaleDateString('pt-BR')}`], [],
-      ["Parecer"], ...relTextoParecer().map(t=>[t]), [],
-      ["Grupo","Indicador", antL, mesL, "Variação", "Avaliação"]
-    ];
-    r.cur.ind.forEach(i=>{ const c = relComparar(i, prev[i.k]); resumo.push([i.g, i.l, relFmt(prev[i.k], i.f), relFmt(i.v, i.f), c.txt, c.aval]); });
+    const r = relAtual;
     const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.aoa_to_sheet(resumo); ws['!cols'] = [{wch:22},{wch:42},{wch:16},{wch:16},{wch:14},{wch:12}];
-    XLSX.utils.book_append_sheet(wb, ws, "Resumo");
+    XLSX.utils.book_append_sheet(wb, relSheetResumo(r, relTextoParecer()), r.tipo==="setor" ? "Setor" : "Resumo");
     if(r.agentes.length){
       const ag = [["Agente","Recebidas atendidas","Realizadas (tentativas)","Realizadas (1 min+)","Chats","Satisfação média","Avaliações","NPS","Monitoria","Tempo em pausa","Pausas acima do limite"]]
         .concat(r.agentes.map(a=>[a.agente, a.recebidas, a.tentativas, a.realizadas, a.chats, relFmt(a.satMedia,"pct"), a.satN,
@@ -2229,31 +2294,48 @@ async function relBaixarExcel(){
       const w2 = XLSX.utils.aoa_to_sheet(ag); w2['!cols'] = [{wch:28}].concat(new Array(10).fill({wch:16}));
       XLSX.utils.book_append_sheet(wb, w2, "Por agente");
     }
-    if(r.pausasTipo.length){
+    if(r.tipo==="setor" && r.pausasTipo.length){
       const pt = [["Tipo","Quantidade","Tempo total","Média","Limite","Acima do limite"]]
         .concat(r.pausasTipo.map(t=>[t.tipo, t.count, fmtSec(t.totalSec), fmtSec(t.media), t.limite?fmtSec(t.limite)+(t.alertOnly?" (alerta)":""):"", t.alertOnly?"":t.excedentesCount]));
       const w3 = XLSX.utils.aoa_to_sheet(pt); w3['!cols'] = [{wch:28}].concat(new Array(5).fill({wch:14}));
       XLSX.utils.book_append_sheet(wb, w3, "Pausas por tipo");
     }
-    XLSX.writeFile(wb, relNomeArquivo("xlsx"));
+    if(todos){
+      const usados = new Set(wb.SheetNames.map(n=>n.toLowerCase()));
+      relAgentesDoSetor().forEach(ra=>{
+        const base = ra.alvo.replace(/[\\\/?*\[\]:]/g," ").slice(0,28).trim() || "Agente";
+        let n = base, k = 2;
+        while(usados.has(n.toLowerCase())) n = base.slice(0,25)+" ("+(k++)+")";
+        usados.add(n.toLowerCase());
+        XLSX.utils.book_append_sheet(wb, relSheetResumo(ra, ra.parecer), n);
+      });
+    }
+    XLSX.writeFile(wb, relNomeArquivo("xlsx", todos));
   }catch(e){ alert("Não foi possível gerar o Excel: " + e.message); }
   finally{ btn.disabled = false; }
 }
-async function relBaixarPdf(){
+async function relBaixarPdf(todos){
   if(!relAtual) return;
-  const btn = document.getElementById('relPdf'); btn.disabled = true; const txt = btn.textContent; btn.textContent = "Gerando…";
+  const btn = document.getElementById(todos ? 'relPdfTodos' : 'relPdf'); btn.disabled = true; const txt = btn.textContent; btn.textContent = "Gerando…";
   try{
     await carregarScript("https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js");
-    const el = document.getElementById('relDoc');
-    el.classList.add('rel-exportando');
-    await html2pdf().set({
-      margin:[10,10,12,10], filename: relNomeArquivo("pdf"),
+    const opt = {
+      margin:[10,10,12,10], filename: relNomeArquivo("pdf", todos),
       image:{type:'jpeg', quality:0.95}, html2canvas:{scale:2, useCORS:true, backgroundColor:'#ffffff'},
       jsPDF:{unit:'mm', format:'a4', orientation:'portrait'},
       pagebreak:{mode:['css','legacy'], avoid:['tr','.rel-head','.rel-parecer p']}
-    }).from(el).save();
+    };
+    const docEl = html => { const d = document.createElement('div'); d.className = 'rel-doc rel-exportando'; d.innerHTML = html; return d; };
+    const partes = [ docEl(relDocHtml(relAtual, relParecerHtml(relTextoParecer()), false)) ];
+    if(todos) relAgentesDoSetor().forEach(ra=>partes.push(docEl(relDocHtml(ra, relParecerHtml(ra.parecer), false))));
+    /* cada relatório começa em uma página nova */
+    let worker = html2pdf().set(opt).from(partes[0]).toPdf();
+    partes.slice(1).forEach(el=>{
+      worker = worker.get('pdf').then(pdf=>{ pdf.addPage(); }).from(el).toContainer().toCanvas().toPdf();
+    });
+    await worker.save();
   }catch(e){ alert("Não foi possível gerar o PDF: " + e.message); }
-  finally{ document.getElementById('relDoc')?.classList.remove('rel-exportando'); btn.disabled = false; btn.textContent = txt; }
+  finally{ btn.disabled = false; btn.textContent = txt; }
 }
 
 /* ---------- RELATÓRIO DE ACESSOS (só admin) ---------- */
