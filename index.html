@@ -1987,18 +1987,17 @@ function relDados(tipo, alvo, mes){
     {g:"Chamadas recebidas", k:"rec_tme", l:"TME (tempo médio de espera)", v:R.tme, f:"sec", dir:-1},
     {g:"Chamadas recebidas", k:"rec_tma", l:"TMA (tempo médio de atendimento)", v:R.tma, f:"sec", dir:0},
     {g:"Chamadas recebidas", k:"rec_rech", l:"% rechamadas no mesmo dia", v:R.pctRechamadas, f:"pct", dir:-1},
-    {g:"Chamadas recebidas", k:"rec_tr", l:"Transferências feitas", v:R.transferFeitas, f:"num", dir:-1},
     {g:"Chamadas realizadas", k:"made_tot", l:"Chamadas realizadas", v:M.total, f:"num", dir:1},
     {g:"Chamadas realizadas", k:"made_at", l:"Chamadas completadas", v:M.atendidas, f:"num", dir:1},
     {g:"Chamadas realizadas", k:"made_tx", l:"Taxa de contato efetivo (1 min ou mais)", v:M.taxaContato, f:"pct100", dir:1},
     {g:"Chamadas realizadas", k:"made_tma", l:"TMA das realizadas", v:M.tma, f:"sec", dir:0},
-    {g:"Chat", k:"chat_tot", l:"Conversas de chat", v:rows.chat.length, f:"num", dir:0},
+    {g:"Chat", k:"chat_tot", l:"Conversas de chat", v:rows.chat.length, f:"num", dir:1},
     {g:"Chat", k:"chat_tme", l:"TME da 1ª resposta", v:P.tmeResp, f:"sec", dir:-1},
     {g:"Chat", k:"chat_tma", l:"TMA do chat", v:P.tma, f:"sec", dir:0},
     {g:"Satisfação", k:"sat_n", l:"Avaliações recebidas", v:S.total, f:"num", dir:0},
-    {g:"Satisfação", k:"sat_m", l:"Satisfação média (1 a 10)", v:S.media, f:"nota", dir:1},
+    {g:"Satisfação", k:"sat_m", l:"Satisfação média", v:S.media/10, f:"pct", dir:1},
     {g:"Satisfação", k:"sat_res", l:"Taxa de resolução", v:Rs.pct, f:"pct", dir:1},
-    {g:"Satisfação", k:"sat_nps", l:"NPS (média 1 a 10)", v:N.media, f:"nota", dir:1},
+    {g:"Satisfação", k:"sat_nps", l:"NPS", v:N.media/10, f:"pct", dir:1},
     {g:"Monitoria", k:"mon_n", l:"Monitorias realizadas", v:Mo.total, f:"num", dir:0},
     {g:"Monitoria", k:"mon_m", l:"Nota média de monitoria", v:Mo.media, f:"pct", dir:1},
     {g:"Pausas", k:"pau_tot", l:"Tempo total em pausa", v:Pa.total, f:"sec", dir:-1},
@@ -2048,7 +2047,8 @@ function relAgentes(rows){
       recebidas: recL.filter(r=>r._status==="Atendida").length,
       realizadas: madeL.filter(r=>r._status==="Atendida" && isFinite(r._dur) && r._dur>=60).length,
       chats: (chat.get(a)||[]).length,
-      satMedia: s.media, satN: s.total, npsMedia: n.media, monMedia: m.media,
+      tentativas: madeL.length,
+      satMedia: s.media/10, satN: s.total, npsMedia: n.media/10, monMedia: m.media,
       pausaTotal: p.total, pausaExc: p.exc };
   }).sort((x,y)=>(y.recebidas+y.realizadas+y.chats)-(x.recebidas+x.realizadas+x.chats));
 }
@@ -2090,9 +2090,9 @@ function relParecer(rel){
     if(top && (top.recebidas+top.realizadas+top.chats)>0) extra.push(`${top.agente} teve o maior volume de atendimentos (${fmtNum(top.recebidas+top.realizadas+top.chats)})`);
     const avaliados = ag.filter(a=>a.satN>=5 && isFinite(a.satMedia)).sort((a,b)=>b.satMedia-a.satMedia);
     if(avaliados.length>=2){
-      extra.push(`a melhor satisfação foi de ${avaliados[0].agente} (${fmtNum(avaliados[0].satMedia,1)})`);
+      extra.push(`a melhor satisfação foi de ${avaliados[0].agente} (${fmtPct(avaliados[0].satMedia)})`);
       const pior = avaliados[avaliados.length-1];
-      if(pior.satMedia < 8) extra.push(`a menor foi de ${pior.agente} (${fmtNum(pior.satMedia,1)}), que merece acompanhamento`);
+      if(pior.satMedia < 0.8) extra.push(`a menor foi de ${pior.agente} (${fmtPct(pior.satMedia)}), que merece acompanhamento`);
     }
     const exc = ag.filter(a=>a.pausaExc>0).sort((a,b)=>b.pausaExc-a.pausaExc);
     const totExc = sum(exc.map(a=>a.pausaExc));
@@ -2152,9 +2152,9 @@ function renderRelatorios(content){
     }).join("");
   }).join("");
   const tabAgentes = r.agentes.length ? `<h3 class="rel-h">Resultado por agente — ${mesL}</h3>
-    <table class="rel-table"><thead><tr><th>Agente</th><th>Recebidas atendidas</th><th>Realizadas (1 min+)</th><th>Chats</th><th>Satisfação</th><th>NPS</th><th>Monitoria</th><th>Tempo em pausa</th><th>Pausas acima do limite</th></tr></thead>
-    <tbody>${r.agentes.map(a=>`<tr><td><b>${esc(a.agente)}</b></td><td class="rel-n">${fmtNum(a.recebidas)}</td><td class="rel-n">${fmtNum(a.realizadas)}</td><td class="rel-n">${fmtNum(a.chats)}</td>
-      <td class="rel-n">${isFinite(a.satMedia)?fmtNum(a.satMedia,1)+` <span class="rel-muted">(${a.satN})</span>`:"—"}</td><td class="rel-n">${relFmt(a.npsMedia,"nota")}</td><td class="rel-n">${relFmt(a.monMedia,"pct")}</td>
+    <table class="rel-table"><thead><tr><th>Agente</th><th>Recebidas atendidas</th><th>Realizadas (tentativas)</th><th>Realizadas (1 min+)</th><th>Chats</th><th>Satisfação</th><th>NPS</th><th>Monitoria</th><th>Tempo em pausa</th><th>Pausas acima do limite</th></tr></thead>
+    <tbody>${r.agentes.map(a=>`<tr><td><b>${esc(a.agente)}</b></td><td class="rel-n">${fmtNum(a.recebidas)}</td><td class="rel-n">${fmtNum(a.tentativas)}</td><td class="rel-n">${fmtNum(a.realizadas)}</td><td class="rel-n">${fmtNum(a.chats)}</td>
+      <td class="rel-n">${isFinite(a.satMedia)?fmtPct(a.satMedia)+` <span class="rel-muted">(${a.satN})</span>`:"—"}</td><td class="rel-n">${relFmt(a.npsMedia,"pct")}</td><td class="rel-n">${relFmt(a.monMedia,"pct")}</td>
       <td class="rel-n">${a.pausaTotal?fmtSec(a.pausaTotal):"—"}</td><td class="rel-n">${fmtNum(a.pausaExc)}</td></tr>`).join("")}</tbody></table>` : "";
   const tabPausas = r.pausasTipo.length ? `<h3 class="rel-h">Pausas por tipo — ${mesL}</h3>
     <table class="rel-table"><thead><tr><th>Tipo</th><th>Quantidade</th><th>Tempo total</th><th>Média</th><th>Limite</th><th>Acima do limite</th></tr></thead>
@@ -2223,10 +2223,10 @@ async function relBaixarExcel(){
     const ws = XLSX.utils.aoa_to_sheet(resumo); ws['!cols'] = [{wch:22},{wch:42},{wch:16},{wch:16},{wch:14},{wch:12}];
     XLSX.utils.book_append_sheet(wb, ws, "Resumo");
     if(r.agentes.length){
-      const ag = [["Agente","Recebidas atendidas","Realizadas (1 min+)","Chats","Satisfação média","Avaliações","NPS (média)","Monitoria","Tempo em pausa","Pausas acima do limite"]]
-        .concat(r.agentes.map(a=>[a.agente, a.recebidas, a.realizadas, a.chats, isFinite(a.satMedia)?+a.satMedia.toFixed(2):"", a.satN,
-          isFinite(a.npsMedia)?+a.npsMedia.toFixed(2):"", relFmt(a.monMedia,"pct"), a.pausaTotal?fmtSec(a.pausaTotal):"", a.pausaExc]));
-      const w2 = XLSX.utils.aoa_to_sheet(ag); w2['!cols'] = [{wch:28}].concat(new Array(9).fill({wch:16}));
+      const ag = [["Agente","Recebidas atendidas","Realizadas (tentativas)","Realizadas (1 min+)","Chats","Satisfação média","Avaliações","NPS","Monitoria","Tempo em pausa","Pausas acima do limite"]]
+        .concat(r.agentes.map(a=>[a.agente, a.recebidas, a.tentativas, a.realizadas, a.chats, relFmt(a.satMedia,"pct"), a.satN,
+          relFmt(a.npsMedia,"pct"), relFmt(a.monMedia,"pct"), a.pausaTotal?fmtSec(a.pausaTotal):"", a.pausaExc]));
+      const w2 = XLSX.utils.aoa_to_sheet(ag); w2['!cols'] = [{wch:28}].concat(new Array(10).fill({wch:16}));
       XLSX.utils.book_append_sheet(wb, w2, "Por agente");
     }
     if(r.pausasTipo.length){
