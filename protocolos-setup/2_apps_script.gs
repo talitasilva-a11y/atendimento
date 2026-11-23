@@ -29,7 +29,13 @@ function enviarProtocolosSupabase(forcar) {
   try {
     if (!SERVICE_ROLE_KEY) return ["ERRO em Protocolos (Supabase): chave SERVICE_ROLE_KEY não cadastrada"];
     const tz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
-    const dia = v => { const d = _paraData(v); return d ? Utilities.formatDate(d, tz, "yyyy-MM-dd") : null; };
+    // Guarda as datas já convertidas: a mesma data se repete em milhares de linhas.
+    const cacheDia = {};
+    const dia = v => {
+      const k = v instanceof Date ? v.getTime() : String(v);
+      if (!(k in cacheDia)) { const d = _paraData(v); cacheDia[k] = d ? Utilities.formatDate(d, tz, "yyyy-MM-dd") : null; }
+      return cacheDia[k];
+    };
     const diaHora = v => { const d = _paraData(v); return d ? Utilities.formatDate(d, tz, "yyyy-MM-dd'T'HH:mm:ss") : null; };
     const texto = v => (v === "" || v === null || v === undefined) ? null : String(v).trim();
     const numero = v => {
@@ -138,7 +144,7 @@ function enviarProtocolosSupabase(forcar) {
     [[PROTO_SUPABASE.tabelaProtocolos, protocolos],
      [PROTO_SUPABASE.tabelaSaldo, saldo],
      [PROTO_SUPABASE.tabelaMovimento, movimento]].forEach(par => {
-      deleteAllRows(par[0]);
+      deleteRows(par[0], null); // um único pedido que apaga a tabela inteira
       if (par[1].length) insertInBatches(par[0], par[1], PROTO_SUPABASE.lote);
     });
     props.setProperty(PROTO_SUPABASE.propriedade, assinatura);
