@@ -286,7 +286,8 @@ table.data-table tbody tr:hover{background:#FAFAFD;}
 .rel-table{width:100%;border-collapse:collapse;font-size:12px;}
 .rel-table th{text-align:left;background:#EEEBFF;color:#372E99;padding:7px 8px;font-weight:600;}
 .rel-table td{padding:6px 8px;border-bottom:1px solid #F0F0F5;}
-.rel-table .rel-n{text-align:right;white-space:nowrap;}
+.rel-table td:not(:first-child){text-align:right;white-space:nowrap;}
+.rel-table th{white-space:nowrap;}
 .rel-table th:not(:first-child){text-align:right;}
 .rel-grp td{background:#F5F6FA;font-weight:700;color:#1C1F26;padding-top:9px;}
 .rel-up{color:#1F8A4C;font-weight:600;} .rel-down{color:#C2500F;font-weight:600;} .rel-muted{color:#8B8F9E;font-weight:400;}
@@ -1974,6 +1975,8 @@ function relRows(key, tipo, alvo, mes, setor){
 const REL_META = 0.9;            // meta de satisfação, NPS, taxa de resolução e monitoria
 const REL_META_MUITO = 0.10;     // 10 p.p. ou mais abaixo da meta = "muito abaixo"
 const PAUSA_TOLERANCIA_SEG = 10; // acima do limite + 10s é falta grave
+const PAUSA_FALTA_TIPOS = ["refei","descanso"]; // só refeição e descanso entram na regra de falta grave
+const relTipoFaltaGrave = tipo => { const t = String(tipo||"").toLowerCase(); return PAUSA_FALTA_TIPOS.some(m=>t.includes(m)); };
 function relMeta(v){
   if(!isFinite(v)) return null;
   const gap = (v-REL_META)*100;
@@ -1988,16 +1991,16 @@ function relMetaTxt(m){
 const relMetaCls = m => !m ? "" : m.nivel==="ok" ? "rel-meta-ok" : m.nivel==="muito" ? "rel-meta-muito" : "rel-meta-baixo";
 function relPausas(rows){
   let exc = 0, controladas = 0;
-  rows.forEach(r=>{ const lim = pauseLimitSecFor(r.tipo, r.setor); if(lim && !pauseIsAlertOnly(r.tipo)){ controladas++; if(r._sec>lim+PAUSA_TOLERANCIA_SEG) exc++; } });
+  rows.forEach(r=>{ const lim = pauseLimitSecFor(r.tipo, r.setor); if(lim && relTipoFaltaGrave(r.tipo)){ controladas++; if(r._sec>lim+PAUSA_TOLERANCIA_SEG) exc++; } });
   return { total: sum(rows.map(r=>r._sec)), media: avg(rows.map(r=>r._sec)), count: rows.length, exc, pctExc: controladas ? exc/controladas : NaN };
 }
 function relPausasPorTipo(rows){
   const out = [];
   groupBy(rows, r=>r.tipo||"—").forEach((list, tipo)=>{
     const limite = pauseLimitSecFor(tipo, list[0]?.setor), alertOnly = pauseIsAlertOnly(tipo);
-    const controlada = !!(limite && !alertOnly);
+    const controlada = !!(limite && relTipoFaltaGrave(tipo));
     const exc = controlada ? list.filter(r=>r._sec>limite+PAUSA_TOLERANCIA_SEG).length : 0;
-    out.push({ tipo, count:list.length, totalSec:sum(list.map(r=>r._sec)), media:avg(list.map(r=>r._sec)), limite, alertOnly,
+    out.push({ tipo, count:list.length, totalSec:sum(list.map(r=>r._sec)), media:avg(list.map(r=>r._sec)), limite, alertOnly, controlada,
       excedentesCount:exc, pctExc: controlada && list.length ? exc/list.length : NaN });
   });
   return out.sort((a,b)=>b.totalSec-a.totalSec);
@@ -2022,7 +2025,7 @@ function relDados(tipo, alvo, mes, setor){
   const ind = [
     {g:"Chamadas recebidas", k:"rec_ent", l:"Chamadas recebidas", v:R.entrantes, f:"num", dir:1},
     {g:"Chamadas recebidas", k:"rec_at", l:"Chamadas atendidas", v:R.atendidas, f:"num", dir:1},
-    {g:"Chamadas recebidas", k:"rec_dia", l:"Média de chamadas atendidas por agente/dia", v:mediaRec, f:"dec1", dir:0},
+    {g:"Chamadas recebidas", k:"rec_dia", l:"Média de chamadas atendidas por agente/dia", v:mediaRec, f:"dec1", dir:1},
     {g:"Chamadas recebidas", k:"rec_pat", l:"% atendidas", v:R.pctAtendidas, f:"pct", dir:1},
     {g:"Chamadas recebidas", k:"rec_ab", l:"% abandono", v:R.pctAbandono, f:"pct", dir:-1},
     {g:"Chamadas recebidas", k:"rec_ns", l:"Nível de serviço (até 20s)", v:R.nivelServico, f:"pct100", dir:1, urgente:true},
@@ -2030,12 +2033,12 @@ function relDados(tipo, alvo, mes, setor){
     {g:"Chamadas recebidas", k:"rec_tma", l:"TMA (tempo médio de atendimento)", v:R.tma, f:"sec", dir:0},
     {g:"Chamadas recebidas", k:"rec_rech", l:"% rechamadas no mesmo dia", v:R.pctRechamadas, f:"pct", dir:-1},
     {g:"Chamadas realizadas", k:"made_tot", l:"Chamadas realizadas", v:M.total, f:"num", dir:1},
-    {g:"Chamadas realizadas", k:"made_dia", l:"Média de chamadas realizadas por agente/dia", v:mediaMade, f:"dec1", dir:0},
+    {g:"Chamadas realizadas", k:"made_dia", l:"Média de chamadas realizadas por agente/dia", v:mediaMade, f:"dec1", dir:1},
     {g:"Chamadas realizadas", k:"made_at", l:"Chamadas completadas", v:M.atendidas, f:"num", dir:1},
     {g:"Chamadas realizadas", k:"made_tx", l:"Taxa de contato efetivo (1 min ou mais)", v:M.taxaContato, f:"pct100", dir:1},
     {g:"Chamadas realizadas", k:"made_tma", l:"TMA das realizadas", v:M.tma, f:"sec", dir:0},
     {g:"Chat", k:"chat_tot", l:"Conversas de chat", v:rows.chat.length, f:"num", dir:1},
-    {g:"Chat", k:"chat_dia", l:"Média de conversas de chat por agente/dia", v:mediaChat, f:"dec1", dir:0},
+    {g:"Chat", k:"chat_dia", l:"Média de conversas de chat por agente/dia", v:mediaChat, f:"dec1", dir:1},
     {g:"Chat", k:"chat_tme", l:"TME da 1ª resposta", v:P.tmeResp, f:"sec", dir:-1},
     {g:"Chat", k:"chat_tma", l:"TMA do chat", v:P.tma, f:"sec", dir:0},
     {g:"Satisfação", k:"sat_n", l:"Avaliações recebidas", v:S.total, f:"num", dir:0},
@@ -2246,7 +2249,7 @@ function relParecer(rel){
     const ex = v("pau_exc"), pe = v("pau_pexc");
     if(ex.v>0){
       let t = `⚠ FALTA GRAVE — Pausas acima do limite: em ${mesL}, ${fmtNum(ex.v)} ${ex.v===1?"pausa ultrapassou":"pausas ultrapassaram"} o limite em mais de ${PAUSA_TOLERANCIA_SEG} segundos`+
-        `${isFinite(pe.v) ? ` (${fmtPct(pe.v)} das pausas com limite definido)` : ""}.`;
+        `${isFinite(pe.v) ? ` (${fmtPct(pe.v)} das pausas de refeição e descanso)` : ""}.`;
       const tipos = rel.pausasTipo.filter(x=>x.excedentesCount>0).sort((x,y)=>y.excedentesCount-x.excedentesCount).slice(0,4);
       if(tipos.length) t += " Por tipo: "+tipos.map(x=>{
         const an = rel.pausasTipoPrev.find(y=>y.tipo===x.tipo);
@@ -2311,7 +2314,7 @@ function relMontar(tipo, alvo, mes, setor){
 let relAtual = null;
 function relClasseAval(c){ return (c.sinal>0 || c.aval==="Sem ocorrências") ? "rel-up" : c.sinal<0 ? "rel-down" : "rel-muted"; }
 const REL_NOTA = `Meta de 90% para satisfação, NPS, taxa de resolução e monitoria; "muito abaixo" significa 10 p.p. ou mais abaixo da meta. `+
-  `Pausas: tolerância de ${PAUSA_TOLERANCIA_SEG} segundos sobre o limite; acima disso é falta grave, e a redução do índice não é considerada melhora enquanto houver ocorrências. `+
+  `Pausas de refeição e descanso: tolerância de ${PAUSA_TOLERANCIA_SEG} segundos sobre o limite; acima disso é falta grave, e a redução do índice não é considerada melhora enquanto houver ocorrências. `+
   `Médias por agente/dia: total dividido pelos dias em que cada agente teve registros.`;
 function relDocHtml(r, parecerHtml, editavel){
   const antL = monthLabelFromISO(r.ant), mesL = monthLabelFromISO(r.mes);
@@ -2326,17 +2329,17 @@ function relDocHtml(r, parecerHtml, editavel){
   }).join("");
   const celMeta = (val, n) => { const m = relMeta(val); return `<td class="rel-n ${relMetaCls(m)}">${isFinite(val) ? fmtPct(val) + (n!=null ? ` <span class="rel-muted">(${n})</span>` : "") : "—"}</td>`; };
   const tabAgentes = r.agentes.length ? `<h3 class="rel-h">Atendimento por agente — ${mesL}</h3>
-    <table class="rel-table"><thead><tr><th>Agente</th><th>Recebidas atendidas</th><th>Recebidas/dia</th><th>Nível de serviço (20s)</th><th>Realizadas (tentativas)</th><th>Realizadas/dia</th><th>Realizadas (1 min+)</th><th>Chats</th><th>Chat/dia</th></tr></thead>
+    <table class="rel-table"><thead><tr><th>Agente</th><th>Recebidas<br>atendidas</th><th>Recebidas<br>por dia</th><th>Nível de serviço<br>(20s)</th><th>Realizadas<br>(tentativas)</th><th>Realizadas<br>por dia</th><th>Realizadas<br>(1 min+)</th><th>Chats</th><th>Chat<br>por dia</th></tr></thead>
     <tbody>${r.agentes.map(a=>`<tr><td><b>${esc(a.agente)}</b></td><td class="rel-n">${fmtNum(a.recebidas)}</td><td class="rel-n">${relFmt(a.recebidasDia,"dec1")}</td><td class="rel-n">${relFmt(a.nivelServ,"pct100")}</td>
       <td class="rel-n">${fmtNum(a.tentativas)}</td><td class="rel-n">${relFmt(a.realizadasDia,"dec1")}</td><td class="rel-n">${fmtNum(a.realizadas)}</td><td class="rel-n">${fmtNum(a.chats)}</td><td class="rel-n">${relFmt(a.chatDia,"dec1")}</td></tr>`).join("")}</tbody></table>
     <h3 class="rel-h">Qualidade e pausas por agente — ${mesL}</h3>
-    <table class="rel-table"><thead><tr><th>Agente</th><th>Satisfação</th><th>NPS</th><th>Taxa de resolução</th><th>Monitoria</th><th>Tempo em pausa</th><th>Pausas em falta grave</th></tr></thead>
+    <table class="rel-table"><thead><tr><th>Agente</th><th>Satisfação</th><th>NPS</th><th>Taxa de<br>resolução</th><th>Monitoria</th><th>Tempo em<br>pausa</th><th>Pausas em<br>falta grave</th></tr></thead>
     <tbody>${r.agentes.map(a=>`<tr><td><b>${esc(a.agente)}</b></td>${celMeta(a.satMedia, a.satN)}${celMeta(a.npsMedia, a.npsN)}${celMeta(a.resPct, a.resN)}${celMeta(a.monMedia, a.monN)}
       <td class="rel-n">${a.pausaTotal ? fmtSec(a.pausaTotal) : "—"}</td><td class="rel-n ${a.pausaExc>0 ? "rel-meta-muito" : ""}">${fmtNum(a.pausaExc)}</td></tr>`).join("")}</tbody></table>` : "";
   const tabPausas = r.pausasTipo.length ? `<h3 class="rel-h">Pausas por tipo — ${mesL}</h3>
-    <table class="rel-table"><thead><tr><th>Tipo</th><th>Quantidade</th><th>Tempo total</th><th>Média</th><th>Limite</th><th>Falta grave (limite + ${PAUSA_TOLERANCIA_SEG}s)</th><th>% em falta grave</th></tr></thead>
+    <table class="rel-table"><thead><tr><th>Tipo</th><th>Quantidade</th><th>Tempo total</th><th>Média</th><th>Limite</th><th>Falta grave<br>(limite + ${PAUSA_TOLERANCIA_SEG}s)</th><th>% em falta<br>grave</th></tr></thead>
     <tbody>${r.pausasTipo.map(t=>`<tr><td>${esc(t.tipo)}</td><td class="rel-n">${fmtNum(t.count)}</td><td class="rel-n">${fmtSec(t.totalSec)}</td><td class="rel-n">${fmtSec(t.media)}</td>
-      <td class="rel-n">${t.limite ? fmtSec(t.limite)+(t.alertOnly?" (alerta)":"") : "—"}</td><td class="rel-n ${t.excedentesCount>0 ? "rel-meta-muito" : ""}">${t.alertOnly ? "—" : fmtNum(t.excedentesCount)}</td><td class="rel-n">${isFinite(t.pctExc) ? fmtPct(t.pctExc) : "—"}</td></tr>`).join("")}</tbody></table>` : "";
+      <td class="rel-n">${t.limite ? fmtSec(t.limite)+(t.alertOnly?" (alerta)":"") : "—"}</td><td class="rel-n ${t.excedentesCount>0 ? "rel-meta-muito" : ""}">${t.controlada ? fmtNum(t.excedentesCount) : "—"}</td><td class="rel-n">${isFinite(t.pctExc) ? fmtPct(t.pctExc) : "—"}</td></tr>`).join("")}</tbody></table>` : "";
   return `<div class="rel-head">
       <div class="rel-logo-box"><img src="logo.png" alt="" class="rel-logo" onerror="this.parentElement.style.display='none'"></div>
       <div><div class="rel-title">Relatório de desempenho — ${r.tipo==="setor"?"Setor":"Agente"}: ${esc(r.alvo)}</div>
@@ -2428,7 +2431,7 @@ function relSheetResumo(r, parecer){
   linhas.push([], [REL_NOTA]);
   if(r.tipo==="agente" && r.pausasTipo.length){
     linhas.push([], ["Pausas por tipo"], ["Tipo","Quantidade","Tempo total","Média","Limite",`Falta grave (limite + ${PAUSA_TOLERANCIA_SEG}s)`,"% em falta grave"]);
-    r.pausasTipo.forEach(t=>linhas.push([t.tipo, t.count, fmtSec(t.totalSec), fmtSec(t.media), t.limite?fmtSec(t.limite)+(t.alertOnly?" (alerta)":""):"", t.alertOnly?"":t.excedentesCount, isFinite(t.pctExc)?fmtPct(t.pctExc):""]));
+    r.pausasTipo.forEach(t=>linhas.push([t.tipo, t.count, fmtSec(t.totalSec), fmtSec(t.media), t.limite?fmtSec(t.limite)+(t.alertOnly?" (alerta)":""):"", t.controlada?t.excedentesCount:"", isFinite(t.pctExc)?fmtPct(t.pctExc):""]));
   }
   const ws = XLSX.utils.aoa_to_sheet(linhas); ws['!cols'] = [{wch:22},{wch:48},{wch:16},{wch:16},{wch:14},{wch:20},{wch:8},{wch:30}];
   return ws;
@@ -2451,7 +2454,7 @@ async function relBaixarExcel(todos){
     }
     if(r.tipo==="setor" && r.pausasTipo.length){
       const pt = [["Tipo","Quantidade","Tempo total","Média","Limite",`Falta grave (limite + ${PAUSA_TOLERANCIA_SEG}s)`,"% em falta grave"]]
-        .concat(r.pausasTipo.map(t=>[t.tipo, t.count, fmtSec(t.totalSec), fmtSec(t.media), t.limite?fmtSec(t.limite)+(t.alertOnly?" (alerta)":""):"", t.alertOnly?"":t.excedentesCount, isFinite(t.pctExc)?fmtPct(t.pctExc):""]));
+        .concat(r.pausasTipo.map(t=>[t.tipo, t.count, fmtSec(t.totalSec), fmtSec(t.media), t.limite?fmtSec(t.limite)+(t.alertOnly?" (alerta)":""):"", t.controlada?t.excedentesCount:"", isFinite(t.pctExc)?fmtPct(t.pctExc):""]));
       const w3 = XLSX.utils.aoa_to_sheet(pt); w3['!cols'] = [{wch:28}].concat(new Array(6).fill({wch:16}));
       XLSX.utils.book_append_sheet(wb, w3, "Pausas por tipo");
     }
