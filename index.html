@@ -866,6 +866,10 @@ const NAV = [
   {key:"pause", label:"Pausas", icon:ICONS.pause},
   {key:"protocols", label:"Protocolos", icon:ICONS.protocols},
 ];
+const NAV_ADMIN = [
+  {key:"acessos", label:"Acessos ao painel", icon:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21v-1a6 6 0 0112 0v1M19 8v4M17 10h4"/></svg>`},
+];
+let perfilAtual = null;
 let currentScreen = "overview";
 let charts = {};
 let rankingCategory = "geral";
@@ -873,6 +877,10 @@ function renderNav(){
   const navList = document.getElementById('navList');
   let html = '<div class="nav-section-label">Painéis</div>';
   NAV.forEach(item=>{ html += navItemHtml(item); });
+  if(perfilAtual && perfilAtual.is_admin){
+    html += '<div class="nav-section-label">Administração</div>';
+    NAV_ADMIN.forEach(item=>{ html += navItemHtml(item); });
+  }
   navList.innerHTML = html;
   navList.querySelectorAll('.nav-item').forEach(el=>{
     el.addEventListener('click', ()=>{ goToScreen(el.dataset.key); document.getElementById('sidebar').classList.remove('open'); });
@@ -886,13 +894,14 @@ function goToScreen(key){
   currentScreen = key;
   renderNav();
   const titles = {overview:"Visão Geral", sector:"Por Setor", ranking:"Ranking de Agentes",
-    queue:"Fila & SLA", chat:"Chat & Transferências", pause:"Pausas", protocols:"Protocolos"};
+    queue:"Fila & SLA", chat:"Chat & Transferências", pause:"Pausas", protocols:"Protocolos", acessos:"Acessos ao painel"};
   document.getElementById('screenTitle').textContent = titles[key] || key;
   renderGlobalFilters();
   renderScreen();
 }
 function renderGlobalFilters(){
   const box = document.getElementById('globalFilters');
+  if(currentScreen==="acessos"){ box.innerHTML = ""; return; }
   if(!hasAnyData()){ box.innerHTML = ""; return; }
   const isProto = currentScreen==="protocols";
   /* Na tela de Protocolos só vale o filtro de setor: a lista é uma foto da última extração. */
@@ -924,6 +933,7 @@ function destroyCharts(){ Object.values(charts).forEach(c=>c && c.destroy && c.d
 function renderScreen(){
   destroyCharts();
   const content = document.getElementById('content');
+  if(currentScreen==="acessos"){ renderAcessos(content); return; }
   if(!hasAnyData()){ content.innerHTML = emptyState(); return; }
   if(currentScreen==="overview"){ content.innerHTML = renderOverview(); afterRenderOverview(); }
   else if(currentScreen==="sector"){ content.innerHTML = renderSector(); afterRenderSector(); }
@@ -1922,6 +1932,65 @@ async function refreshAllData(){
   hideSyncIndicator();
 }
 
+/* ---------- RELATÓRIO DE ACESSOS (só admin) ---------- */
+async function registrarAcesso(tipo){
+  try{
+    const { error } = await supabaseClient.from("acessos_log").insert({ tipo, navegador: navigator.userAgent.slice(0,300) });
+    if(error) console.warn("Não foi possível registrar o acesso:", error.message);
+  }catch(e){ console.warn("Não foi possível registrar o acesso:", e); }
+}
+const acessosUI = { pessoa:"all", dias:"30" };
+async function renderAcessos(content){
+  if(!(perfilAtual && perfilAtual.is_admin)){
+    content.innerHTML = `<div class="empty-state"><h3>Área restrita ao administrador</h3></div>`; return;
+  }
+  content.innerHTML = `<p class="proto-note">Carregando acessos…</p>`;
+  let q = supabaseClient.from("acessos_log").select("*").order("acessado_em",{ascending:false}).limit(5000);
+  if(acessosUI.dias!=="all") q = q.gte("acessado_em", new Date(Date.now()-Number(acessosUI.dias)*864e5).toISOString());
+  const { data, error } = await q;
+  if(currentScreen!=="acessos") return;
+  if(error){
+    content.innerHTML = `<div class="empty-state"><h3>Não foi possível carregar os acessos</h3>
+      <p>${esc(error.message)}<br>Confira se o script <b>3_acessos.sql</b> já foi executado no Supabase.</p></div>`; return;
+  }
+  const todos = data||[];
+  const quem = r => r.nome || r.email || "—";
+  const pessoas = Array.from(new Set(todos.map(quem))).sort((a,b)=>a.localeCompare(b,'pt-BR'));
+  if(acessosUI.pessoa!=="all" && !pessoas.includes(acessosUI.pessoa)) acessosUI.pessoa="all";
+  const rows = acessosUI.pessoa==="all" ? todos : todos.filter(r=>quem(r)===acessosUI.pessoa);
+  const fmtDH = iso => new Date(iso).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
+  const hoje = new Date().toDateString();
+  const porPessoa = Array.from(groupBy(rows, quem).entries()).map(([p,rs])=>({p, email:rs[0].email, setor:rs[0].setor, total:rs.length,
+    logins:rs.filter(r=>r.tipo==="login").length, ultimo:rs[0].acessado_em})).sort((a,b)=>b.ultimo.localeCompare(a.ultimo));
+  const kpis = [
+    kpiCard("Acessos no período", fmtNum(rows.length), "logins + reaberturas do site"),
+    kpiCard("Pessoas diferentes", fmtNum(porPessoa.length), ""),
+    kpiCard("Acessos hoje", fmtNum(rows.filter(r=>new Date(r.acessado_em).toDateString()===hoje).length), ""),
+  ];
+  const tipoPill = t => t==="login" ? `<span class="pill pill-purple">Login</span>` : `<span class="pill pill-gray">Já estava logado</span>`;
+  content.innerHTML = `
+  <div class="proto-controls" style="margin-bottom:12px;">
+    <select class="filter-select" id="acDias">
+      <option value="1">Últimas 24 horas</option><option value="7">Últimos 7 dias</option>
+      <option value="30">Últimos 30 dias</option><option value="90">Últimos 90 dias</option><option value="all">Todo o histórico</option>
+    </select>
+    <select class="filter-select" id="acPessoa"><option value="all">Todas as pessoas</option>${pessoas.map(p=>`<option value="${esc(p)}">${esc(p)}</option>`).join("")}</select>
+    <button class="btn btn-ghost btn-sm" id="acRefresh">↻ Atualizar</button>
+  </div>
+  <div class="kpi-grid">${kpis.join("")}</div>
+  <div class="section-title"><span class="chev">›</span> Último acesso de cada pessoa</div>
+  <div class="card"><div class="table-wrap"><table class="data-table"><thead><tr><th>Pessoa</th><th>E-mail</th><th>Setor</th><th>Último acesso</th><th>Acessos</th><th>Logins com senha</th></tr></thead>
+  <tbody>${porPessoa.map(r=>`<tr><td><b>${esc(r.p)}</b></td><td>${esc(r.email||"—")}</td><td>${esc(r.setor||"—")}</td><td>${fmtDH(r.ultimo)}</td><td>${fmtNum(r.total)}</td><td>${fmtNum(r.logins)}</td></tr>`).join("") || `<tr><td colspan="6">Nenhum acesso no período.</td></tr>`}</tbody></table></div></div>
+  <div class="section-title"><span class="chev">›</span> Histórico de acessos <small style="font-weight:500;color:var(--text-muted);">do mais recente para o mais antigo${rows.length>500?" · mostrando os 500 mais recentes":""}</small></div>
+  <div class="card"><div class="table-wrap"><table class="data-table"><thead><tr><th>Data e hora</th><th>Pessoa</th><th>Setor</th><th>Tipo</th></tr></thead>
+  <tbody>${rows.slice(0,500).map(r=>`<tr><td>${fmtDH(r.acessado_em)}</td><td><b>${esc(quem(r))}</b></td><td>${esc(r.setor||"—")}</td><td>${tipoPill(r.tipo)}</td></tr>`).join("") || `<tr><td colspan="4">Nenhum acesso no período.</td></tr>`}</tbody></table></div></div>`;
+  document.getElementById('acDias').value = acessosUI.dias;
+  document.getElementById('acPessoa').value = acessosUI.pessoa;
+  document.getElementById('acDias').addEventListener('change', e=>{ acessosUI.dias=e.target.value; renderAcessos(content); });
+  document.getElementById('acPessoa').addEventListener('change', e=>{ acessosUI.pessoa=e.target.value; renderAcessos(content); });
+  document.getElementById('acRefresh').addEventListener('click', ()=>renderAcessos(content));
+}
+
 async function carregarPerfilUsuario(userId){
   const { data, error } = await supabaseClient.from("perfis").select("*").eq("id", userId).single();
   if(error){ console.warn("Perfil não encontrado:", error.message); return null; }
@@ -1951,12 +2020,14 @@ async function fazerLogin(){
     document.getElementById("loginError").textContent = "E-mail ou senha inválidos.";
     return;
   }
-  await iniciarAppLogado(data.user);
+  await iniciarAppLogado(data.user, "login");
 }
 
-async function iniciarAppLogado(user){
+async function iniciarAppLogado(user, tipoAcesso){
   esconderLogin();
   const perfil = await carregarPerfilUsuario(user.id);
+  perfilAtual = perfil;
+  registrarAcesso(tipoAcesso || "sessao");
   adicionarBotaoSair(perfil);
 
   const hasCache = await loadFromCacheIfAny();
