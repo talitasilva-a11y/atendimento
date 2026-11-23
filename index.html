@@ -268,6 +268,28 @@ table.data-table tbody tr:hover{background:#FAFAFD;}
 .menu-toggle svg{width:22px;height:22px;}
 @media(max-width:900px){.menu-toggle{display:flex;}}
 
+/* ---------- RELATÓRIOS ---------- */
+.rel-controls{margin-bottom:12px;flex-wrap:wrap;}
+.rel-doc{background:#fff;color:#1C1F26;border:1px solid #E7E8EF;border-radius:12px;padding:28px 32px;max-width:1000px;font-family:'Inter',sans-serif;}
+.rel-doc.rel-exportando{border:none;border-radius:0;padding:0;max-width:none;}
+.rel-head{display:flex;align-items:center;gap:16px;border-bottom:3px solid #7063F0;padding-bottom:14px;margin-bottom:6px;}
+.rel-logo{height:34px;display:block;}
+.rel-logo-box{background:#1C1F26;border-radius:8px;padding:8px 12px;flex-shrink:0;}
+.rel-title{font-family:'Sora',sans-serif;font-weight:700;font-size:19px;color:#372E99;}
+.rel-sub{font-size:12px;color:#6B7280;margin-top:4px;}
+.rel-h{font-family:'Sora',sans-serif;font-size:14px;color:#372E99;margin:22px 0 8px;}
+.rel-parecer{font-size:13px;line-height:1.6;border:1px dashed #B3ABF7;border-radius:8px;padding:12px 14px;background:#FAFAFF;outline:none;}
+.rel-parecer:focus{border-style:solid;border-color:#7063F0;}
+.rel-parecer p{margin:0 0 8px;} .rel-parecer p:last-child{margin-bottom:0;}
+.rel-exportando .rel-parecer{border:none;background:none;padding:0;}
+.rel-table{width:100%;border-collapse:collapse;font-size:12px;}
+.rel-table th{text-align:left;background:#EEEBFF;color:#372E99;padding:7px 8px;font-weight:600;}
+.rel-table td{padding:6px 8px;border-bottom:1px solid #F0F0F5;}
+.rel-table .rel-n{text-align:right;white-space:nowrap;}
+.rel-table th:not(:first-child){text-align:right;}
+.rel-grp td{background:#F5F6FA;font-weight:700;color:#1C1F26;padding-top:9px;}
+.rel-up{color:#1F8A4C;font-weight:600;} .rel-down{color:#C2500F;font-weight:600;} .rel-muted{color:#8B8F9E;font-weight:400;}
+@media (max-width:700px){ .rel-doc{padding:16px;overflow-x:auto;} }
 /* ---------- LOGIN ---------- */
 .login-screen{
   position:fixed;inset:0;background:#F5F6FA;
@@ -867,6 +889,7 @@ const NAV = [
   {key:"protocols", label:"Protocolos", icon:ICONS.protocols},
 ];
 const NAV_ADMIN = [
+  {key:"relatorios", label:"Relatórios", icon:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9l-6-6z"/><path d="M14 3v6h6M8 17v-3M12 17v-6M16 17v-2"/></svg>`},
   {key:"acessos", label:"Acessos ao painel", icon:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21v-1a6 6 0 0112 0v1M19 8v4M17 10h4"/></svg>`},
 ];
 let perfilAtual = null;
@@ -894,14 +917,14 @@ function goToScreen(key){
   currentScreen = key;
   renderNav();
   const titles = {overview:"Visão Geral", sector:"Por Setor", ranking:"Ranking de Agentes",
-    queue:"Fila & SLA", chat:"Chat & Transferências", pause:"Pausas", protocols:"Protocolos", acessos:"Acessos ao painel"};
+    queue:"Fila & SLA", chat:"Chat & Transferências", pause:"Pausas", protocols:"Protocolos", acessos:"Acessos ao painel", relatorios:"Relatórios"};
   document.getElementById('screenTitle').textContent = titles[key] || key;
   renderGlobalFilters();
   renderScreen();
 }
 function renderGlobalFilters(){
   const box = document.getElementById('globalFilters');
-  if(currentScreen==="acessos"){ box.innerHTML = ""; return; }
+  if(currentScreen==="acessos" || currentScreen==="relatorios"){ box.innerHTML = ""; return; }
   if(!hasAnyData()){ box.innerHTML = ""; return; }
   const isProto = currentScreen==="protocols";
   /* Na tela de Protocolos só vale o filtro de setor: a lista é uma foto da última extração. */
@@ -934,6 +957,7 @@ function renderScreen(){
   destroyCharts();
   const content = document.getElementById('content');
   if(currentScreen==="acessos"){ renderAcessos(content); return; }
+  if(currentScreen==="relatorios"){ renderRelatorios(content); return; }
   if(!hasAnyData()){ content.innerHTML = emptyState(); return; }
   if(currentScreen==="overview"){ content.innerHTML = renderOverview(); afterRenderOverview(); }
   else if(currentScreen==="sector"){ content.innerHTML = renderSector(); afterRenderSector(); }
@@ -1930,6 +1954,306 @@ async function refreshAllData(){
   renderScreen();
   updateSidebarStatus();
   hideSyncIndicator();
+}
+
+/* ---------- RELATÓRIO POR SETOR / AGENTE (só admin) ---------- */
+const relUI = { tipo:"setor", alvo:"", mes:"" };
+const REL_GRUPOS = ["Chamadas recebidas","Chamadas realizadas","Chat","Satisfação","Monitoria","Pausas"];
+function relPrevMes(iso){ const [y,m] = iso.split("-").map(Number); return monthKeyISO(new Date(y, m-2, 1)); }
+function relRows(key, tipo, alvo, mes){
+  return (state.rows[key]||[]).filter(r=> r._date && monthKeyISO(r._date)===mes &&
+    String(tipo==="setor" ? (r.setor||"") : (r.agente||"")).trim()===alvo);
+}
+function relPausas(rows){
+  let exc = 0, controladas = 0;
+  rows.forEach(r=>{ const lim = pauseLimitSecFor(r.tipo, r.setor); if(lim && !pauseIsAlertOnly(r.tipo)){ controladas++; if(r._sec>lim) exc++; } });
+  return { total: sum(rows.map(r=>r._sec)), media: avg(rows.map(r=>r._sec)), count: rows.length, exc, pctExc: controladas ? exc/controladas : NaN };
+}
+function relDados(tipo, alvo, mes){
+  const g = k => relRows(k, tipo, alvo, mes);
+  const rows = { rec:g('received'), made:g('made'), chat:g('chat'), perf:g('chatPerf'), sat:g('satisfaction'), mon:g('monitoring'), pau:g('pause') };
+  const R = computeReceivedMetrics(rows.rec), M = computeMadeMetrics(rows.made), P = computeChatPerfMetrics(rows.perf);
+  const S = computeSatisfacao(rows.sat), Rs = computeResolucao(rows.sat), N = computeNps(rows.sat), Mo = computeMonitoria(rows.mon);
+  const Pa = relPausas(rows.pau);
+  const tem = { "Chamadas recebidas":rows.rec.length, "Chamadas realizadas":rows.made.length, "Chat":rows.chat.length+rows.perf.length,
+    "Satisfação":rows.sat.length, "Monitoria":rows.mon.length, "Pausas":rows.pau.length };
+  /* dir: 1 = maior é melhor, -1 = menor é melhor, 0 = só informativo */
+  const ind = [
+    {g:"Chamadas recebidas", k:"rec_ent", l:"Chamadas recebidas", v:R.entrantes, f:"num", dir:1},
+    {g:"Chamadas recebidas", k:"rec_at", l:"Chamadas atendidas", v:R.atendidas, f:"num", dir:1},
+    {g:"Chamadas recebidas", k:"rec_pat", l:"% atendidas", v:R.pctAtendidas, f:"pct", dir:1},
+    {g:"Chamadas recebidas", k:"rec_ab", l:"% abandono", v:R.pctAbandono, f:"pct", dir:-1},
+    {g:"Chamadas recebidas", k:"rec_ns", l:"Nível de serviço (até 20s)", v:R.nivelServico, f:"pct100", dir:1},
+    {g:"Chamadas recebidas", k:"rec_tme", l:"TME (tempo médio de espera)", v:R.tme, f:"sec", dir:-1},
+    {g:"Chamadas recebidas", k:"rec_tma", l:"TMA (tempo médio de atendimento)", v:R.tma, f:"sec", dir:0},
+    {g:"Chamadas recebidas", k:"rec_rech", l:"% rechamadas no mesmo dia", v:R.pctRechamadas, f:"pct", dir:-1},
+    {g:"Chamadas recebidas", k:"rec_tr", l:"Transferências feitas", v:R.transferFeitas, f:"num", dir:-1},
+    {g:"Chamadas realizadas", k:"made_tot", l:"Chamadas realizadas", v:M.total, f:"num", dir:1},
+    {g:"Chamadas realizadas", k:"made_at", l:"Chamadas completadas", v:M.atendidas, f:"num", dir:1},
+    {g:"Chamadas realizadas", k:"made_tx", l:"Taxa de contato efetivo (1 min ou mais)", v:M.taxaContato, f:"pct100", dir:1},
+    {g:"Chamadas realizadas", k:"made_tma", l:"TMA das realizadas", v:M.tma, f:"sec", dir:0},
+    {g:"Chat", k:"chat_tot", l:"Conversas de chat", v:rows.chat.length, f:"num", dir:0},
+    {g:"Chat", k:"chat_tme", l:"TME da 1ª resposta", v:P.tmeResp, f:"sec", dir:-1},
+    {g:"Chat", k:"chat_tma", l:"TMA do chat", v:P.tma, f:"sec", dir:0},
+    {g:"Satisfação", k:"sat_n", l:"Avaliações recebidas", v:S.total, f:"num", dir:0},
+    {g:"Satisfação", k:"sat_m", l:"Satisfação média (1 a 10)", v:S.media, f:"nota", dir:1},
+    {g:"Satisfação", k:"sat_res", l:"Taxa de resolução", v:Rs.pct, f:"pct", dir:1},
+    {g:"Satisfação", k:"sat_nps", l:"NPS (média 1 a 10)", v:N.media, f:"nota", dir:1},
+    {g:"Monitoria", k:"mon_n", l:"Monitorias realizadas", v:Mo.total, f:"num", dir:0},
+    {g:"Monitoria", k:"mon_m", l:"Nota média de monitoria", v:Mo.media, f:"pct", dir:1},
+    {g:"Pausas", k:"pau_tot", l:"Tempo total em pausa", v:Pa.total, f:"sec", dir:-1},
+    {g:"Pausas", k:"pau_med", l:"Duração média por pausa", v:Pa.media, f:"sec", dir:-1},
+    {g:"Pausas", k:"pau_exc", l:"Pausas acima do limite", v:Pa.exc, f:"num", dir:-1},
+    {g:"Pausas", k:"pau_pexc", l:"% de pausas acima do limite", v:Pa.pctExc, f:"pct", dir:-1},
+  ].map(i=>({...i, v: tem[i.g] ? i.v : NaN}));
+  return { rows, ind, tem };
+}
+function relFmt(v, f){
+  if(!isFinite(v)) return "—";
+  if(f==="pct") return fmtPct(v);
+  if(f==="pct100") return fmtPct(v/100);
+  if(f==="sec") return fmtSec(v);
+  if(f==="nota") return fmtNum(v,1);
+  return fmtNum(v);
+}
+/* Compara o mês com o anterior. mag = tamanho da mudança (0 = estável). */
+function relComparar(i, ant){
+  const a = ant, b = i.v;
+  if(!isFinite(a) || !isFinite(b)) return { txt:"—", mag:0, aval:"" };
+  let txt, mag;
+  if(i.f==="pct" || i.f==="pct100"){
+    const pp = i.f==="pct" ? (b-a)*100 : (b-a);
+    txt = (pp>0?"+":"")+fmtNum(pp,1)+" p.p."; mag = Math.abs(pp)<0.5 ? 0 : pp/10;
+  }else if(i.f==="nota"){
+    const d = Math.round((b-a)*10)/10; txt = (d>0?"+":"")+fmtNum(d,1); mag = Math.abs(d)<0.2 ? 0 : d;
+  }else if(a===0){
+    txt = b===0 ? "0%" : "novo"; mag = b===0 ? 0 : 1;
+  }else{
+    const r = (b-a)/a; txt = (r>0?"+":"")+fmtPct(r); mag = Math.abs(r)<0.02 ? 0 : r;
+  }
+  let aval = "";
+  if(i.dir!==0) aval = mag===0 ? "Estável" : (mag*i.dir>0 ? "Melhorou" : "Piorou");
+  return { txt, mag, aval };
+}
+function relAgentes(rows){
+  const nomes = new Set();
+  Object.values(rows).forEach(list=>list.forEach(r=>{ if(r.agente) nomes.add(String(r.agente).trim()); }));
+  const by = k => groupBy(rows[k], r=>String(r.agente||"").trim());
+  const rec = by('rec'), made = by('made'), chat = by('chat'), sat = by('sat'), mon = by('mon'), pau = by('pau');
+  return Array.from(nomes).map(a=>{
+    const s = computeSatisfacao(sat.get(a)||[]), n = computeNps(sat.get(a)||[]), m = computeMonitoria(mon.get(a)||[]);
+    const p = relPausas(pau.get(a)||[]);
+    const recL = rec.get(a)||[], madeL = made.get(a)||[];
+    return { agente:a,
+      recebidas: recL.filter(r=>r._status==="Atendida").length,
+      realizadas: madeL.filter(r=>r._status==="Atendida" && isFinite(r._dur) && r._dur>=60).length,
+      chats: (chat.get(a)||[]).length,
+      satMedia: s.media, satN: s.total, npsMedia: n.media, monMedia: m.media,
+      pausaTotal: p.total, pausaExc: p.exc };
+  }).sort((x,y)=>(y.recebidas+y.realizadas+y.chats)-(x.recebidas+x.realizadas+x.chats));
+}
+function relMesTxt(iso){ const [y,m] = iso.split("-"); return MESES_PT_LONG[+m-1].toLowerCase()+" de "+y; }
+function relLista(itens){ return itens.length<=1 ? itens.join("") : itens.slice(0,-1).join("; ")+" e "+itens[itens.length-1]; }
+function relParecer(rel){
+  const mesL = relMesTxt(rel.mes), antL = relMesTxt(rel.ant), antCurto = antL.split(" ")[0];
+  const quem = rel.tipo==="setor" ? `o setor ${rel.alvo}` : `o(a) agente ${rel.alvo}`;
+  const ind = rel.cur.ind, prev = Object.fromEntries(rel.prv.ind.map(i=>[i.k, i.v]));
+  const v = k => ind.find(i=>i.k===k);
+  const temAnterior = REL_GRUPOS.some(g=>rel.prv.tem[g]);
+  const p = [];
+
+  const partes = [];
+  const vol = (k, nome) => { const i = v(k); if(!isFinite(i.v)) return;
+    const c = relComparar(i, prev[k]);
+    const cmp = c.txt==="—" ? "" : c.mag===0 ? ` (estável em relação a ${antCurto})` : ` (${c.txt} em relação a ${antCurto})`;
+    partes.push(`${fmtNum(i.v)} ${nome}${cmp}`); };
+  vol("rec_ent","chamadas recebidas"); vol("made_tot","chamadas realizadas"); vol("chat_tot","conversas de chat");
+  p.push(partes.length ? `Em ${mesL}, ${quem} registrou ${relLista(partes)}.`
+                       : `Em ${mesL}, não há registros de chamadas ou chat para ${quem}.`);
+
+  if(!temAnterior){
+    p.push(`Não há dados de ${antL} para comparação; os números refletem apenas a competência selecionada.`);
+  }else{
+    const comp = ind.filter(i=>i.dir!==0).map(i=>({i, c:relComparar(i, prev[i.k])})).filter(x=>x.c.mag!==0);
+    const frase = x => `${x.i.l}: de ${relFmt(prev[x.i.k], x.i.f)} para ${relFmt(x.i.v, x.i.f)}`;
+    const bons = comp.filter(x=>x.c.mag*x.i.dir>0).sort((a,b)=>Math.abs(b.c.mag)-Math.abs(a.c.mag)).slice(0,4);
+    const ruins = comp.filter(x=>x.c.mag*x.i.dir<0).sort((a,b)=>Math.abs(b.c.mag)-Math.abs(a.c.mag)).slice(0,4);
+    if(bons.length) p.push(`Pontos positivos em relação a ${antL}: ${relLista(bons.map(frase))}.`);
+    if(ruins.length) p.push(`Pontos de atenção: ${relLista(ruins.map(frase))}.`);
+    if(!bons.length && !ruins.length) p.push(`Os indicadores de qualidade ficaram estáveis em relação a ${antL}.`);
+  }
+
+  if(rel.tipo==="setor" && rel.agentes.length){
+    const ag = rel.agentes;
+    const top = ag[0];
+    const extra = [];
+    if(top && (top.recebidas+top.realizadas+top.chats)>0) extra.push(`${top.agente} teve o maior volume de atendimentos (${fmtNum(top.recebidas+top.realizadas+top.chats)})`);
+    const avaliados = ag.filter(a=>a.satN>=5 && isFinite(a.satMedia)).sort((a,b)=>b.satMedia-a.satMedia);
+    if(avaliados.length>=2){
+      extra.push(`a melhor satisfação foi de ${avaliados[0].agente} (${fmtNum(avaliados[0].satMedia,1)})`);
+      const pior = avaliados[avaliados.length-1];
+      if(pior.satMedia < 8) extra.push(`a menor foi de ${pior.agente} (${fmtNum(pior.satMedia,1)}), que merece acompanhamento`);
+    }
+    const exc = ag.filter(a=>a.pausaExc>0).sort((a,b)=>b.pausaExc-a.pausaExc);
+    const totExc = sum(exc.map(a=>a.pausaExc));
+    if(exc.length){
+      const tops = exc.slice(0,2);
+      extra.push(`das ${fmtNum(totExc)} pausas acima do limite, ${fmtNum(sum(tops.map(a=>a.pausaExc)))} foram de ${relLista(tops.map(a=>a.agente))}`);
+    }
+    if(extra.length) p.push(`Por agente: ${relLista(extra)}.`);
+  }
+
+  const vazios = REL_GRUPOS.filter(g=>!rel.cur.tem[g]);
+  if(vazios.length) p.push(`Sem registros na competência: ${relLista(vazios)}.`);
+  return p;
+}
+function relMontar(){
+  const ant = relPrevMes(relUI.mes);
+  const cur = relDados(relUI.tipo, relUI.alvo, relUI.mes);
+  const prv = relDados(relUI.tipo, relUI.alvo, ant);
+  const rel = { tipo:relUI.tipo, alvo:relUI.alvo, mes:relUI.mes, ant, cur, prv,
+    agentes: relUI.tipo==="setor" ? relAgentes(cur.rows) : [],
+    pausasTipo: computePausasPorTipo(cur.rows.pau),
+    setores: relUI.tipo==="agente" ? Array.from(new Set(Object.values(cur.rows).flat().map(r=>String(r.setor||"").trim()).filter(Boolean))).sort() : [] };
+  rel.parecer = relParecer(rel);
+  return rel;
+}
+let relAtual = null;
+function renderRelatorios(content){
+  if(!(perfilAtual && perfilAtual.is_admin)){
+    content.innerHTML = `<div class="empty-state"><h3>Área restrita ao administrador</h3></div>`; return;
+  }
+  if(!hasAnyData()){ content.innerHTML = emptyState(); return; }
+  const meses = allMonthsAvailable().slice().reverse();
+  if(!meses.includes(relUI.mes)) relUI.mes = meses[0] || "";
+  const alvos = relUI.tipo==="setor" ? allSetores() : allAgentes();
+  if(!alvos.includes(relUI.alvo)) relUI.alvo = alvos[0] || "";
+  const controles = `<div class="proto-controls rel-controls">
+    <select class="filter-select" id="relTipo"><option value="setor">Relatório por setor</option><option value="agente">Relatório por agente</option></select>
+    <select class="filter-select" id="relAlvo">${alvos.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join("")}</select>
+    <select class="filter-select" id="relMes">${meses.map(m=>`<option value="${m}">${monthLabelFromISO(m)}</option>`).join("")}</select>
+    <span style="flex:1"></span>
+    <button class="btn btn-ghost btn-sm" id="relRefazer" title="Descarta suas edições e gera o parecer de novo">↺ Refazer parecer</button>
+    <button class="btn btn-ghost btn-sm" id="relExcel">⬇ Excel</button>
+    <button class="btn btn-primary btn-sm" id="relPdf">⬇ PDF</button>
+  </div>`;
+  if(!relUI.mes || !relUI.alvo){ content.innerHTML = controles + `<p class="proto-note">Não há dados suficientes para montar o relatório.</p>`; relBind(content); return; }
+  relAtual = relMontar();
+  const r = relAtual;
+  const antL = monthLabelFromISO(r.ant), mesL = monthLabelFromISO(r.mes);
+  const prev = Object.fromEntries(r.prv.ind.map(i=>[i.k, i.v]));
+  const linhasInd = REL_GRUPOS.map(g=>{
+    const itens = r.cur.ind.filter(i=>i.g===g);
+    if(!r.cur.tem[g] && !r.prv.tem[g]) return `<tr class="rel-grp"><td colspan="5">${g} <span class="rel-muted">— sem registros</span></td></tr>`;
+    return `<tr class="rel-grp"><td colspan="5">${g}</td></tr>` + itens.map(i=>{
+      const c = relComparar(i, prev[i.k]);
+      const cls = c.aval==="Melhorou" ? "rel-up" : c.aval==="Piorou" ? "rel-down" : "rel-muted";
+      return `<tr><td>${i.l}</td><td class="rel-n">${relFmt(prev[i.k], i.f)}</td><td class="rel-n"><b>${relFmt(i.v, i.f)}</b></td><td class="rel-n">${c.txt}</td><td class="${cls}">${c.aval||""}</td></tr>`;
+    }).join("");
+  }).join("");
+  const tabAgentes = r.agentes.length ? `<h3 class="rel-h">Resultado por agente — ${mesL}</h3>
+    <table class="rel-table"><thead><tr><th>Agente</th><th>Recebidas atendidas</th><th>Realizadas (1 min+)</th><th>Chats</th><th>Satisfação</th><th>NPS</th><th>Monitoria</th><th>Tempo em pausa</th><th>Pausas acima do limite</th></tr></thead>
+    <tbody>${r.agentes.map(a=>`<tr><td><b>${esc(a.agente)}</b></td><td class="rel-n">${fmtNum(a.recebidas)}</td><td class="rel-n">${fmtNum(a.realizadas)}</td><td class="rel-n">${fmtNum(a.chats)}</td>
+      <td class="rel-n">${isFinite(a.satMedia)?fmtNum(a.satMedia,1)+` <span class="rel-muted">(${a.satN})</span>`:"—"}</td><td class="rel-n">${relFmt(a.npsMedia,"nota")}</td><td class="rel-n">${relFmt(a.monMedia,"pct")}</td>
+      <td class="rel-n">${a.pausaTotal?fmtSec(a.pausaTotal):"—"}</td><td class="rel-n">${fmtNum(a.pausaExc)}</td></tr>`).join("")}</tbody></table>` : "";
+  const tabPausas = r.pausasTipo.length ? `<h3 class="rel-h">Pausas por tipo — ${mesL}</h3>
+    <table class="rel-table"><thead><tr><th>Tipo</th><th>Quantidade</th><th>Tempo total</th><th>Média</th><th>Limite</th><th>Acima do limite</th></tr></thead>
+    <tbody>${r.pausasTipo.map(t=>`<tr><td>${esc(t.tipo)}</td><td class="rel-n">${fmtNum(t.count)}</td><td class="rel-n">${fmtSec(t.totalSec)}</td><td class="rel-n">${fmtSec(t.media)}</td>
+      <td class="rel-n">${t.limite?fmtSec(t.limite)+(t.alertOnly?" (alerta)":""):"—"}</td><td class="rel-n">${t.alertOnly?"—":fmtNum(t.excedentesCount)}</td></tr>`).join("")}</tbody></table>` : "";
+  content.innerHTML = controles + `
+  <p class="proto-note">O parecer abaixo é gerado automaticamente a partir dos números. <b>Clique no texto para editar</b> antes de baixar o PDF ou o Excel. Ao trocar o setor, o agente ou a competência, o parecer é gerado de novo.</p>
+  <div class="rel-doc" id="relDoc">
+    <div class="rel-head">
+      <div class="rel-logo-box"><img src="logo.png" alt="" class="rel-logo" onerror="this.parentElement.style.display='none'"></div>
+      <div><div class="rel-title">Relatório de desempenho — ${r.tipo==="setor"?"Setor":"Agente"}: ${esc(r.alvo)}</div>
+      <div class="rel-sub">Competência: <b>${mesL}</b> · comparado a ${antL}${r.setores.length?` · Setor(es): ${esc(r.setores.join(", "))}`:""} · gerado em ${new Date().toLocaleDateString('pt-BR')}</div></div>
+    </div>
+    <h3 class="rel-h">Parecer</h3>
+    <div class="rel-parecer" id="relParecer" contenteditable="true" spellcheck="true">${r.parecer.map(t=>`<p>${esc(t)}</p>`).join("")}</div>
+    <h3 class="rel-h">Indicadores — ${mesL} x ${antL}</h3>
+    <table class="rel-table"><thead><tr><th>Indicador</th><th>${antL}</th><th>${mesL}</th><th>Variação</th><th>Avaliação</th></tr></thead><tbody>${linhasInd}</tbody></table>
+    ${tabAgentes}
+    ${tabPausas}
+  </div>`;
+  relBind(content);
+}
+function relBind(content){
+  const $ = id => document.getElementById(id);
+  $('relTipo').value = relUI.tipo; if($('relAlvo')) $('relAlvo').value = relUI.alvo; if($('relMes')) $('relMes').value = relUI.mes;
+  $('relTipo').addEventListener('change', e=>{ relUI.tipo = e.target.value; relUI.alvo = ""; renderRelatorios(content); });
+  $('relAlvo').addEventListener('change', e=>{ relUI.alvo = e.target.value; renderRelatorios(content); });
+  $('relMes').addEventListener('change', e=>{ relUI.mes = e.target.value; renderRelatorios(content); });
+  $('relRefazer').addEventListener('click', ()=>renderRelatorios(content));
+  $('relExcel').addEventListener('click', relBaixarExcel);
+  $('relPdf').addEventListener('click', relBaixarPdf);
+}
+function relNomeArquivo(ext){
+  const limpo = s => String(s).normalize("NFD").replace(/[̀-ͯ]/g,"").replace(/[^A-Za-z0-9]+/g,"_").replace(/^_|_$/g,"");
+  return `Relatorio_${relAtual.tipo==="setor"?"Setor":"Agente"}_${limpo(relAtual.alvo)}_${relAtual.mes}.${ext}`;
+}
+function relTextoParecer(){
+  const el = document.getElementById('relParecer');
+  return el ? el.innerText.split(/\n+/).map(s=>s.trim()).filter(Boolean) : [];
+}
+const _scriptsCarregados = {};
+function carregarScript(src){
+  if(!_scriptsCarregados[src]) _scriptsCarregados[src] = new Promise((ok, falha)=>{
+    const s = document.createElement('script'); s.src = src; s.onload = ok;
+    s.onerror = ()=>{ delete _scriptsCarregados[src]; falha(new Error("não foi possível carregar " + src)); };
+    document.head.appendChild(s);
+  });
+  return _scriptsCarregados[src];
+}
+async function relBaixarExcel(){
+  if(!relAtual) return;
+  const btn = document.getElementById('relExcel'); btn.disabled = true;
+  try{
+    await carregarScript("https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js");
+    const r = relAtual, mesL = monthLabelFromISO(r.mes), antL = monthLabelFromISO(r.ant);
+    const prev = Object.fromEntries(r.prv.ind.map(i=>[i.k, i.v]));
+    const resumo = [
+      [`Relatório de desempenho — ${r.tipo==="setor"?"Setor":"Agente"}: ${r.alvo}`],
+      [`Competência: ${mesL} · comparado a ${antL}${r.setores.length?` · Setor(es): ${r.setores.join(", ")}`:""}`],
+      [`Gerado em ${new Date().toLocaleDateString('pt-BR')}`], [],
+      ["Parecer"], ...relTextoParecer().map(t=>[t]), [],
+      ["Grupo","Indicador", antL, mesL, "Variação", "Avaliação"]
+    ];
+    r.cur.ind.forEach(i=>{ const c = relComparar(i, prev[i.k]); resumo.push([i.g, i.l, relFmt(prev[i.k], i.f), relFmt(i.v, i.f), c.txt, c.aval]); });
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet(resumo); ws['!cols'] = [{wch:22},{wch:42},{wch:16},{wch:16},{wch:14},{wch:12}];
+    XLSX.utils.book_append_sheet(wb, ws, "Resumo");
+    if(r.agentes.length){
+      const ag = [["Agente","Recebidas atendidas","Realizadas (1 min+)","Chats","Satisfação média","Avaliações","NPS (média)","Monitoria","Tempo em pausa","Pausas acima do limite"]]
+        .concat(r.agentes.map(a=>[a.agente, a.recebidas, a.realizadas, a.chats, isFinite(a.satMedia)?+a.satMedia.toFixed(2):"", a.satN,
+          isFinite(a.npsMedia)?+a.npsMedia.toFixed(2):"", relFmt(a.monMedia,"pct"), a.pausaTotal?fmtSec(a.pausaTotal):"", a.pausaExc]));
+      const w2 = XLSX.utils.aoa_to_sheet(ag); w2['!cols'] = [{wch:28}].concat(new Array(9).fill({wch:16}));
+      XLSX.utils.book_append_sheet(wb, w2, "Por agente");
+    }
+    if(r.pausasTipo.length){
+      const pt = [["Tipo","Quantidade","Tempo total","Média","Limite","Acima do limite"]]
+        .concat(r.pausasTipo.map(t=>[t.tipo, t.count, fmtSec(t.totalSec), fmtSec(t.media), t.limite?fmtSec(t.limite)+(t.alertOnly?" (alerta)":""):"", t.alertOnly?"":t.excedentesCount]));
+      const w3 = XLSX.utils.aoa_to_sheet(pt); w3['!cols'] = [{wch:28}].concat(new Array(5).fill({wch:14}));
+      XLSX.utils.book_append_sheet(wb, w3, "Pausas por tipo");
+    }
+    XLSX.writeFile(wb, relNomeArquivo("xlsx"));
+  }catch(e){ alert("Não foi possível gerar o Excel: " + e.message); }
+  finally{ btn.disabled = false; }
+}
+async function relBaixarPdf(){
+  if(!relAtual) return;
+  const btn = document.getElementById('relPdf'); btn.disabled = true; const txt = btn.textContent; btn.textContent = "Gerando…";
+  try{
+    await carregarScript("https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js");
+    const el = document.getElementById('relDoc');
+    el.classList.add('rel-exportando');
+    await html2pdf().set({
+      margin:[10,10,12,10], filename: relNomeArquivo("pdf"),
+      image:{type:'jpeg', quality:0.95}, html2canvas:{scale:2, useCORS:true, backgroundColor:'#ffffff'},
+      jsPDF:{unit:'mm', format:'a4', orientation:'portrait'},
+      pagebreak:{mode:['css','legacy'], avoid:['tr','.rel-head','.rel-parecer p']}
+    }).from(el).save();
+  }catch(e){ alert("Não foi possível gerar o PDF: " + e.message); }
+  finally{ document.getElementById('relDoc')?.classList.remove('rel-exportando'); btn.disabled = false; btn.textContent = txt; }
 }
 
 /* ---------- RELATÓRIO DE ACESSOS (só admin) ---------- */
